@@ -1,0 +1,7 @@
+# MANAGED BY ANSIBLE — glueops.proxmox_evpn, role pve_zabbix.
+# Item keys consumed by a template linked on the Zabbix server side.
+# All four read cache files populated by /etc/cron.d/zbx-ipmi-refresh.
+UserParameter=ipmi.discovery,{{ pve_zabbix_helper }} discover
+UserParameter=ipmi.sensor[*],{{ pve_zabbix_helper }} sensor "$1"
+UserParameter=ipmi.chassis[*],{{ pve_zabbix_helper }} status "$1"
+UserParameter=ipmi.sel.count,{{ pve_zabbix_helper }} sel-count

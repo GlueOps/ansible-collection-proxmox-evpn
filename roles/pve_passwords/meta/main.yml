@@ -1,0 +1,18 @@
+---
+galaxy_info:
+  role_name: pve_passwords
+  author: GlueOps
+  description: >-
+    Set local account passwords across a Proxmox fleet, hashing on the control
+    node so no plaintext crosses the wire.
+  license: Apache-2.0
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - trixie
+        - bookworm
+  galaxy_tags:
+    - proxmox
+    - security
+dependencies: []

@@ -1,0 +1,47 @@
+---
+# Hashing happens on the CONTROL NODE — only the SHA-512 crypt string crosses
+# the wire, never the plaintext. The salt is derived deterministically from
+# hostname plus account name, which means (a) re-running with the same password
+# is genuinely idempotent instead of reporting changed every time, and (b) the
+# same password does not produce an identical hash on every host in the fleet.
+#
+# On Proxmox, the web UI's root@pam realm authenticates against the Linux
+# password, so changing root here also changes the web UI login. SSH key auth is
+# unaffected, so this cannot lock Ansible out.
+
+- name: Skip when no accounts were supplied
+  ansible.builtin.meta: end_host
+  when: pve_password_targets | length == 0
+
+- name: Confirm each target account already exists
+  ansible.builtin.command: "id -u {{ item.name }}"
+  loop: "{{ pve_password_targets }}"
+  loop_control:
+    label: "{{ item.name }}"
+  changed_when: false
+  when: pve_passwords_require_existing | bool
+
+- name: Set the password
+  ansible.builtin.user:
+    name: "{{ item.name }}"
+    password: "{{ item.pw | password_hash('sha512', ((inventory_hostname ~ item.name) | hash('sha512'))[:16]) }}"
+    update_password: always
+  loop: "{{ pve_password_targets }}"
+  loop_control:
+    label: "{{ item.name }}"
+  # Hides the rendered crypt hash from stdout and the log. A SHA-512 crypt
+  # string is not the password, but it is offline-crackable, so it does not
+  # belong in terminal scrollback or CI output.
+  no_log: true
+
+- name: Read back the account status (no secrets — status flag and last-change date)
+  ansible.builtin.command: "passwd -S {{ item.name }}"
+  loop: "{{ pve_password_targets }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: pve_pw_status
+  changed_when: false
+
+- name: Result
+  ansible.builtin.debug:
+    msg: "{{ pve_pw_status.results | map(attribute='stdout') | list }}"

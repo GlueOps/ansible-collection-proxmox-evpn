@@ -1,0 +1,9 @@
+# MANAGED BY ANSIBLE — glueops.proxmox_evpn, role pve_backup. Do not edit.
+[{{ pve_backup_remote_name }}]
+type = drive
+scope = drive
+service_account_file = {{ pve_backup_sa_keyfile_dest }}
+team_drive = {{ pve_backup_drive_id }}
+{% if pve_backup_folder_id | length > 0 %}
+root_folder_id = {{ pve_backup_folder_id }}
+{% endif %}

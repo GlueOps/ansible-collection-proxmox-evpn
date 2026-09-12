@@ -1,0 +1,34 @@
+---
+- name: Install the fleet sshd drop-in
+  ansible.builtin.copy:
+    dest: "{{ pve_sshd_drop_in }}"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # MANAGED BY ANSIBLE — glueops.proxmox_evpn, role pve_sshd.
+      # Tuning for concurrent automation against this fleet.
+
+      MaxStartups {{ pve_sshd_max_startups }}
+      MaxSessions {{ pve_sshd_max_sessions }}
+      LoginGraceTime {{ pve_sshd_login_grace_time }}
+      ClientAliveInterval {{ pve_sshd_client_alive_interval }}
+      ClientAliveCountMax {{ pve_sshd_client_alive_count_max }}
+  notify: validate and reload sshd
+
+- name: Apply changes now
+  ansible.builtin.meta: flush_handlers
+
+- name: Read back the effective sshd settings
+  ansible.builtin.shell: |
+    sshd -T 2>/dev/null | grep -E '^(maxstartups|maxsessions|logingracetime|clientaliveinterval|clientalivecountmax) '
+  args:
+    executable: /bin/bash
+  register: pve_sshd_effective
+  changed_when: false
+  run_once: true
+
+- name: Result summary
+  ansible.builtin.debug:
+    msg: "{{ pve_sshd_effective.stdout_lines }}"
+  run_once: true

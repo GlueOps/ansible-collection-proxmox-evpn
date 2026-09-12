@@ -1,0 +1,15 @@
+---
+# Put this in YOUR private inventory repository and install with:
+#
+#   ansible-galaxy collection install -r requirements.yml
+#
+# Pin a version. An unpinned collection means a `galaxy install` months from now
+# silently changes what your next production run does.
+collections:
+  - name: glueops.proxmox_evpn
+    version: "1.0.0"
+
+  # Or track a branch straight from git while you are developing against it:
+  # - name: https://github.com/GlueOps/ansible-collection-proxmox-evpn.git
+  #   type: git
+  #   version: main

@@ -1,0 +1,44 @@
+---
+- name: Verify the public bridge holds the public IP
+  ansible.builtin.command: ip -br addr show {{ pve_bridge_public }}
+  register: pve_public_state
+  changed_when: false
+
+- name: Verify the default route
+  ansible.builtin.command: ip route show default
+  register: pve_default_route
+  changed_when: false
+
+- name: Confirm the upstream gateway is reachable
+  ansible.builtin.command: ping -c 2 -W 2 {{ pve_public_gateway }}
+  register: pve_gw_ping
+  changed_when: false
+
+- name: Verify the PVE API sees the bridges
+  ansible.builtin.command: pvesh get nodes/{{ inventory_hostname }}/network --output-format json
+  register: pve_api_network
+  changed_when: false
+
+- name: Confirm runtime ring buffers and queues match the configured maxima
+  ansible.builtin.shell: |
+    set -o pipefail
+    echo "--- ring ---"
+    ethtool -g {{ pve_link_iface }} 2>/dev/null | awk '/Current hardware settings:/{f=1;next} f && /^(RX|TX):/{print}'
+    echo "--- queues ---"
+    ethtool -l {{ pve_link_iface }} 2>/dev/null | awk '/Current hardware settings:/{f=1;next} f && /^Combined:/{print}'
+  args:
+    executable: /bin/bash
+  register: pve_post_tune
+  changed_when: false
+
+- name: Result summary
+  ansible.builtin.debug:
+    msg:
+      backup: "{{ pve_backup_path }}"
+      rollback: "{{ pve_rollback_script }}"
+      public_bridge: "{{ pve_public_state.stdout }}"
+      default_route: "{{ pve_default_route.stdout }}"
+      gw_ping_rc: "{{ pve_gw_ping.rc }}"
+      pve_visible_ifaces: "{{ pve_api_network.stdout | from_json | map(attribute='iface') | sort }}"
+      underlay_mtu: "{{ pve_underlay_effective_mtu }}"
+      post_tune: "{{ pve_post_tune.stdout_lines }}"

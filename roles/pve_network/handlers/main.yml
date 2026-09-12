@@ -1,0 +1,23 @@
+---
+# ifreload runs async and unpolled: it tears down and rebuilds the bridge that
+# carries this SSH session, so a synchronous call would hang on its own
+# disconnect. The pause lets the interfaces settle, then wait_for_connection
+# re-establishes before the play continues.
+- name: ifreload async
+  ansible.builtin.command: ifreload -a
+  async: 30
+  poll: 0
+  changed_when: true
+  listen: reload network
+
+- name: settle pause
+  ansible.builtin.pause:
+    seconds: 5
+  listen: reload network
+
+- name: wait for ssh
+  ansible.builtin.wait_for_connection:
+    delay: 0
+    sleep: 3
+    timeout: 90
+  listen: reload network

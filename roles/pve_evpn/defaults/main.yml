@@ -1,0 +1,45 @@
+---
+# ===========================================================================
+# pve_evpn — FRR BGP-EVPN control plane
+# ===========================================================================
+#
+# REQUIRED per-host variables (from your inventory):
+#   pve_link_ip    underlay address with mask — also the BGP router-id and
+#                  the VXLAN local tunnel IP, so it must match pve_network
+
+# iBGP autonomous system number, shared by every host in the fleet.
+pve_bgp_asn: 65000
+
+# --- Inventory group names -------------------------------------------------
+# Topology is toggle-driven by group membership, not by code:
+#   pve_route_reflector_group empty -> full mesh between every host
+#   otherwise                       -> members are RRs and reflect to the rest
+pve_fleet_group: pve_nodes
+pve_route_reflector_group: pve_route_reflectors
+
+# --- FRR -------------------------------------------------------------------
+pve_frr_packages:
+  - frr
+  - frr-pythontools
+pve_frr_conf_path: /etc/frr/frr.conf
+pve_frr_daemons_path: /etc/frr/daemons
+
+# Aggressive BGP timers. The fabric is a single L2 underlay with sub-millisecond
+# RTT, so a 3s keepalive / 9s hold detects a dead peer far faster than the
+# 60/180 default without any realistic risk of a false positive.
+pve_bgp_keepalive: 3
+pve_bgp_holdtime: 9
+
+# VXLAN devices whose FDB is dumped in the post-run summary.
+pve_evpn_report_devices:
+  - vxlan_lan
+  - vxlan_nat
+
+# --- Convergence gate ------------------------------------------------------
+# After writing the config, wait until every peer that actually has a bgpd
+# listening is Established. A configured peer with nothing on TCP/179 is a host
+# that has not been bootstrapped yet, not a fault — a strict "every peer must be
+# up" gate makes a first rollout impossible, because the RRs gain neighbor
+# statements for hosts that do not have FRR yet.
+pve_bgp_gate_retries: 20
+pve_bgp_gate_delay: 3

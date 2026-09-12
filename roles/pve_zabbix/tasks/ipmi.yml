@@ -1,0 +1,23 @@
+---
+- name: Ensure the IPMI kernel modules load at boot
+  ansible.builtin.copy:
+    dest: "{{ pve_zabbix_modules_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # MANAGED BY ANSIBLE — glueops.proxmox_evpn, role pve_zabbix.
+      {% for m in pve_ipmi_kernel_modules %}
+      {{ m }}
+      {% endfor %}
+
+- name: Load the IPMI modules now
+  # No-op if already loaded or the hardware is absent.
+  ansible.builtin.shell: |
+    set -e
+    for m in {{ pve_ipmi_kernel_modules | join(' ') }}; do
+      lsmod | awk '{print $1}' | grep -qx "$m" || modprobe "$m" || true
+    done
+  args:
+    executable: /bin/bash
+  changed_when: false

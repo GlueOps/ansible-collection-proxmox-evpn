@@ -1,0 +1,11 @@
+---
+# Read-only diagnostics. Changes nothing, safe against a live fleet.
+#
+#   ansible-playbook glueops.proxmox_evpn.diagnostics
+#   ansible-playbook glueops.proxmox_evpn.diagnostics --tags underlay
+#   ansible-playbook glueops.proxmox_evpn.diagnostics --tags lldp
+- name: Gather fleet diagnostics
+  hosts: "{{ pve_fleet_group | default('pve_nodes') }}"
+  gather_facts: false
+  roles:
+    - role: glueops.proxmox_evpn.pve_diagnostics

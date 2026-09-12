@@ -1,0 +1,59 @@
+---
+# What the switch says about this host's uplinks. The switch is the only
+# authority on VLAN membership and port MTU — a port in the right VLAN but left
+# at the default MTU ARPs and pings perfectly and fails only a full-size
+# DF-ping, which is a completely different fault from a VLAN problem and easy to
+# conflate with one.
+- name: Collect LLDP port facts from the switch
+  ansible.builtin.script: "lldp-port-facts.sh {{ pve_diag_lldp_ifaces | join(' ') }}"
+  register: pve_diag_lldp
+  changed_when: false
+  tags: [lldp, never]
+
+- name: Report LLDP port facts
+  ansible.builtin.debug:
+    msg: "{{ pve_diag_lldp.stdout_lines }}"
+  tags: [lldp, never]
+
+# The two tests fail independently and mean different things. Plain ping failing
+# is L1/L2 — cabling, or the port is not in the underlay VLAN so ARP never
+# resolves. Plain ping passing while DF-ping fails means the switch port MTU is
+# below the underlay MTU: everything looks healthy right up until a large frame.
+- name: Run the underlay mesh and MTU test
+  ansible.builtin.script: >-
+    underlay-mesh-test.sh
+    {{ pve_diag_underlay_prefix | trim }}
+    {{ pve_diag_underlay_first | trim }}
+    {{ pve_diag_underlay_last | trim }}
+    {{ pve_diag_underlay_mtu }}
+    {{ pve_link_iface | default('eno2') }}
+  register: pve_diag_underlay
+  changed_when: false
+  tags: underlay
+
+- name: Report the underlay mesh result
+  ansible.builtin.debug:
+    msg: "{{ pve_diag_underlay.stdout_lines }}"
+  tags: underlay
+
+- name: Survey model, BIOS and BMC firmware
+  ansible.builtin.script: idrac-survey.sh
+  register: pve_diag_survey
+  changed_when: false
+  tags: hardware
+
+# Flags a host that has silently lost a DIMM: MemTotal a whole module short of
+# what the BIOS reports installed, which the OS never complains about.
+# uncorrectable > 0 means take the host out of service.
+- name: Report DIMM inventory, ECC counts and the memory map
+  ansible.builtin.script: hw-memory-report.sh
+  register: pve_diag_memory
+  changed_when: false
+  tags: hardware
+
+- name: Report the hardware survey
+  ansible.builtin.debug:
+    msg:
+      survey: "{{ pve_diag_survey.stdout_lines }}"
+      memory: "{{ pve_diag_memory.stdout_lines }}"
+  tags: hardware

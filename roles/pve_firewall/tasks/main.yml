@@ -1,0 +1,23 @@
+---
+- name: Build the shared interface-exemption argv fragment
+  ansible.builtin.set_fact:
+    # Prepended to every INPUT jump so the out-of-band mesh is never filtered.
+    # Empty when pve_firewall_exempt_iface is "", which applies the chains to
+    # all interfaces.
+    pve_fw_exempt_argv: >-
+      {{ ['!', '-i', pve_firewall_exempt_iface]
+         if (pve_firewall_exempt_iface | length > 0) else [] }}
+  tags: [dhcp, zabbix, ssh, confirm]
+
+- name: Configure the public-wire DHCP filter
+  ansible.builtin.include_tasks: dhcp.yml
+  when: pve_firewall_manage_dhcp | bool
+  tags: dhcp
+
+- name: Configure the monitoring agent whitelist
+  ansible.builtin.include_tasks: monitoring.yml
+  tags: zabbix
+
+- name: Configure the SSH whitelist
+  ansible.builtin.include_tasks: ssh.yml
+  tags: [ssh, confirm]

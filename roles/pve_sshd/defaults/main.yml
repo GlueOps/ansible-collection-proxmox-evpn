@@ -1,0 +1,23 @@
+---
+# ===========================================================================
+# pve_sshd — sshd tuning for concurrent automation
+# ===========================================================================
+#
+# Symptom this fixes: per-VM cloud-init uploads appear to "hang" mid-provision
+# when a provisioner runs with default parallelism. What is actually happening
+# is that sshd starts probabilistically dropping pre-auth handshakes once the
+# unauthenticated-connection limit is reached, and the client retries with
+# backoff. The defaults (MaxStartups 10:30:100, MaxSessions 10) are reached the
+# moment you launch more than ten parallel VM creates.
+pve_sshd_drop_in: /etc/ssh/sshd_config.d/99-pve-fleet.conf
+pve_sshd_service: ssh
+
+# Concurrent unauthenticated handshakes before probabilistic drop begins.
+pve_sshd_max_startups: "100:30:200"
+# Channels per connection. SFTP uploads share a connection when multiplexed.
+pve_sshd_max_sessions: 50
+# Faster cleanup of half-open handshakes under load (default 120).
+pve_sshd_login_grace_time: 60
+# Keep idle sessions alive across colo NAT and firewall idle timers.
+pve_sshd_client_alive_interval: 30
+pve_sshd_client_alive_count_max: 3

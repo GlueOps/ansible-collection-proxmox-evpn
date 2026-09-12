@@ -1,0 +1,76 @@
+---
+- name: Refuse to run without a monitoring server configured
+  ansible.builtin.assert:
+    that:
+      - pve_monitoring_server | length > 0
+    fail_msg: >-
+      pve_monitoring_server must be set before the zabbix tag can run — the
+      chain it builds ends in DROP, so an empty whitelist would black-hole the
+      agent port entirely. Set it, or run with --skip-tags zabbix.
+
+- name: Build the monitoring jump argv
+  ansible.builtin.set_fact:
+    pve_monitoring_jump_argv: >-
+      {{ ['INPUT'] + pve_fw_exempt_argv +
+         ['-p', 'tcp', '--dport', pve_monitoring_agent_port | string,
+          '-j', pve_monitoring_chain] }}
+
+- name: Resolve {{ pve_monitoring_server }} to IPv4
+  ansible.builtin.shell: |
+    set -o pipefail
+    getent ahostsv4 {{ pve_monitoring_server }} | awk '{print $1}' | sort -u
+  args:
+    executable: /bin/bash
+  register: pve_monitoring_ips
+  changed_when: false
+
+- name: Refuse to proceed if the lookup returned no addresses
+  ansible.builtin.assert:
+    that: pve_monitoring_ips.stdout_lines | length > 0
+    fail_msg: >-
+      Could not resolve {{ pve_monitoring_server }} — refusing to install a
+      whitelist chain with no ACCEPT rules in front of its trailing DROP.
+
+- name: Rebuild the monitoring whitelist chain atomically
+  # iptables-restore -n (noflush) leaves INPUT and every other chain untouched;
+  # only the chain declared here is flushed and repopulated, in one syscall.
+  ansible.builtin.shell:
+    cmd: iptables-restore -n
+    stdin: |
+      *filter
+      :{{ pve_monitoring_chain }} - [0:0]
+      {% for ip in pve_monitoring_ips.stdout_lines %}
+      -A {{ pve_monitoring_chain }} -s {{ ip }}/32 -j ACCEPT
+      {% endfor %}
+      -A {{ pve_monitoring_chain }} -j DROP
+      COMMIT
+  changed_when: true
+  notify: persist iptables
+
+- name: Probe whether INPUT jumps to the monitoring chain
+  ansible.builtin.command:
+    argv: "{{ ['iptables', '-C'] + pve_monitoring_jump_argv }}"
+  register: pve_monitoring_jump_check
+  failed_when: false
+  changed_when: false
+
+- name: Insert the INPUT jump for the monitoring agent port
+  ansible.builtin.command:
+    argv: "{{ ['iptables', '-I', pve_monitoring_jump_argv[0], '1'] + pve_monitoring_jump_argv[1:] }}"
+  when: pve_monitoring_jump_check.rc != 0
+  notify: persist iptables
+
+- name: Show the relevant INPUT rules
+  ansible.builtin.command: iptables -S INPUT
+  register: pve_input_chain
+  changed_when: false
+
+- name: Result summary (DHCP and monitoring)
+  ansible.builtin.debug:
+    msg:
+      drop_external_dhcp: "{{ pve_drop_external_dhcp | default('(dhcp tag not run)') }}"
+      public_iface: "{{ pve_parent_iface }}"
+      monitoring_server_ips: "{{ pve_monitoring_ips.stdout_lines | default([]) }}"
+      input_relevant_rules: >-
+        {{ pve_input_chain.stdout_lines
+           | select('search', 'physdev|' ~ (pve_monitoring_agent_port | string)) | list }}

@@ -1,0 +1,12 @@
+---
+# Validate then reload in a single shell — if `sshd -t` fails the reload never
+# runs, so a typo in the drop-in cannot take SSH down.
+- name: validate and reload sshd
+  ansible.builtin.shell: |
+    set -e
+    sshd -t
+    systemctl reload {{ pve_sshd_service }}
+  args:
+    executable: /bin/bash
+  changed_when: true
+  listen: validate and reload sshd

@@ -1,0 +1,39 @@
+---
+- name: Build the DHCP-drop rule
+  ansible.builtin.set_fact:
+    pve_dhcp_rule_argv:
+      - INPUT
+      - -m
+      - physdev
+      - --physdev-in
+      - "{{ pve_parent_iface }}"
+      - -p
+      - udp
+      - --dport
+      - "{{ pve_dhcp_filter_port }}"
+      - -j
+      - DROP
+    pve_drop_external_dhcp: "{{ inventory_hostname in groups.get(pve_dhcp_server_group, []) }}"
+
+- name: Probe whether the DHCP-drop rule is currently present
+  ansible.builtin.command:
+    argv: "{{ ['iptables', '-C'] + pve_dhcp_rule_argv }}"
+  register: pve_dhcp_rule_state
+  failed_when: false
+  changed_when: false
+
+- name: Add the DHCP-drop rule (host serves DHCP to its guests)
+  ansible.builtin.command:
+    argv: "{{ ['iptables', '-A'] + pve_dhcp_rule_argv }}"
+  when:
+    - pve_drop_external_dhcp | bool
+    - pve_dhcp_rule_state.rc != 0
+  notify: persist iptables
+
+- name: Remove the DHCP-drop rule (host does not serve DHCP)
+  ansible.builtin.command:
+    argv: "{{ ['iptables', '-D'] + pve_dhcp_rule_argv }}"
+  when:
+    - not (pve_drop_external_dhcp | bool)
+    - pve_dhcp_rule_state.rc == 0
+  notify: persist iptables

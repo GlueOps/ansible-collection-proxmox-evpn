@@ -1,0 +1,43 @@
+---
+# ===========================================================================
+# pve_diagnostics — read-only fact gathering from the hardware and the wire
+# ===========================================================================
+#
+# Every task here is read-only and none of them change host state, so the role
+# is safe to run against a live fleet at any time. Select what to run with tags:
+#
+#   --tags lldp      what the switch says: chassis, port, VLAN, port MTU
+#   --tags underlay  full-mesh ping + DF-ping at the underlay MTU
+#   --tags hardware  model, BIOS, BMC firmware, DIMM inventory, ECC counts
+#
+# underlay and hardware run by default. lldp is tagged `never` and runs only
+# when you ask for it by name, because it waits for a periodic advertisement
+# and costs ~80 seconds per interface.
+
+# Interfaces to ask the switch about via LLDP. Takes ~80s per interface,
+# because LLDP is advertised roughly every 30s.
+pve_diag_lldp_ifaces:
+  - "{{ pve_parent_iface | default('eno1') }}"
+  - "{{ pve_link_iface | default('eno2') }}"
+
+# Underlay mesh test bounds. The script walks <prefix>.<first> to <prefix>.<last>
+# and tests each peer twice: plain ping, then DF-ping at the underlay MTU.
+#
+# Derived from the inventory by default, so it needs no manual maintenance:
+# every fleet host's pve_link_ip shares a /24 prefix and the octets are the
+# range of their last octets.
+pve_diag_underlay_prefix: >-
+  {{ (pve_link_ip | split('/') | first | split('.'))[0:3] | join('.') }}
+pve_diag_underlay_first: >-
+  {{ groups[pve_fleet_group | default('pve_nodes')]
+     | map('extract', hostvars, 'pve_link_ip')
+     | map('regex_replace', '/.*$', '')
+     | map('regex_replace', '^.*\.', '') | map('int') | min }}
+pve_diag_underlay_last: >-
+  {{ groups[pve_fleet_group | default('pve_nodes')]
+     | map('extract', hostvars, 'pve_link_ip')
+     | map('regex_replace', '/.*$', '')
+     | map('regex_replace', '^.*\.', '') | map('int') | max }}
+pve_diag_underlay_mtu: "{{ pve_underlay_target_mtu | default(1500) }}"
+
+pve_fleet_group: pve_nodes

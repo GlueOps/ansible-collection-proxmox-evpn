@@ -1,0 +1,87 @@
+---
+# Operator-gated jumbo: pve_underlay_target_mtu defaults to 1500. Probe the
+# NIC's max MTU, max ring buffers and max queues, then compute effective values
+# capped by that target. ifupdown's post-up hooks persist the ethtool tuning
+# across reboots.
+#
+# check_mode: false on every probe below — they mutate nothing, and must run
+# under --check or the derived MTUs come out empty and the assert fails on an
+# otherwise-healthy host.
+
+- name: Probe NIC max MTU
+  ansible.builtin.shell: |
+    set -o pipefail
+    ip -d link show {{ pve_link_iface }} | grep -oP 'maxmtu \K\d+' | head -1
+  args:
+    executable: /bin/bash
+  register: pve_probe_max_mtu
+  changed_when: false
+  check_mode: false
+
+- name: Probe NIC max ring sizes
+  ansible.builtin.shell: |
+    set -o pipefail
+    ethtool -g {{ pve_link_iface }} 2>/dev/null | awk '
+      /Pre-set maximums:/ {found=1; next}
+      /Current hardware settings:/ {exit}
+      found && /^RX:/ {rx=$2}
+      found && /^TX:/ {tx=$2}
+      END {print (rx?rx:0)" "(tx?tx:0)}'
+  args:
+    executable: /bin/bash
+  register: pve_probe_ring
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Probe NIC max combined queues
+  ansible.builtin.shell: |
+    set -o pipefail
+    ethtool -l {{ pve_link_iface }} 2>/dev/null | awk '
+      /Pre-set maximums:/ {found=1; next}
+      /Current hardware settings:/ {exit}
+      found && /^Combined:/ {print $2; exit}'
+  args:
+    executable: /bin/bash
+  register: pve_probe_queues
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Compute effective NIC settings
+  ansible.builtin.set_fact:
+    pve_nic_max_mtu: "{{ pve_probe_max_mtu.stdout | int }}"
+    pve_nic_max_rx: "{{ (pve_probe_ring.stdout.split() | first | default('0')) | int }}"
+    pve_nic_max_tx: "{{ (pve_probe_ring.stdout.split() | last | default('0')) | int }}"
+    pve_nic_max_queues: "{{ pve_probe_queues.stdout | default('0') | int }}"
+    pve_local_link_ip: "{{ pve_link_ip | split('/') | first }}"
+
+- name: Sanity-check the NIC reported a maxmtu
+  ansible.builtin.assert:
+    that:
+      - (pve_nic_max_mtu | int) >= 1500
+    fail_msg: >-
+      Could not read maxmtu for {{ pve_link_iface }} — refusing to proceed
+      (got: '{{ pve_probe_max_mtu.stdout }}').
+
+- name: Derive effective underlay MTU and the VXLAN/bridge MTUs beneath it
+  ansible.builtin.set_fact:
+    pve_underlay_effective_mtu: "{{ [pve_underlay_target_mtu | int, pve_nic_max_mtu | int] | min }}"
+
+- name: Derive VXLAN and bridge MTUs (underlay minus the 50-byte VXLAN header)
+  ansible.builtin.set_fact:
+    pve_vxlan_mtu: "{{ (pve_underlay_effective_mtu | int) - 50 }}"
+    pve_bridge_mtu: "{{ (pve_underlay_effective_mtu | int) - 50 }}"
+
+- name: Show planned NIC tuning
+  ansible.builtin.debug:
+    msg:
+      link_iface: "{{ pve_link_iface }}"
+      target_mtu: "{{ pve_underlay_target_mtu }}"
+      nic_max_mtu: "{{ pve_nic_max_mtu }}"
+      underlay_effective_mtu: "{{ pve_underlay_effective_mtu }}"
+      vxlan_mtu: "{{ pve_vxlan_mtu }}"
+      bridge_mtu: "{{ pve_bridge_mtu }}"
+      rx_ring_max: "{{ pve_nic_max_rx }}"
+      tx_ring_max: "{{ pve_nic_max_tx }}"
+      queues_max: "{{ pve_nic_max_queues }}"

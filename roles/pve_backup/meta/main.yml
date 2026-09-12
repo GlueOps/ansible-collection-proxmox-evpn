@@ -1,0 +1,20 @@
+---
+galaxy_info:
+  role_name: pve_backup
+  author: GlueOps
+  description: >-
+    Hourly rclone push of a Proxmox host's networking, FRR and DHCP
+    configuration to a Google Shared Drive, authenticated with a service
+    account.
+  license: Apache-2.0
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - trixie
+        - bookworm
+  galaxy_tags:
+    - proxmox
+    - backup
+    - rclone
+dependencies: []

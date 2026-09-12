@@ -1,0 +1,63 @@
+---
+- name: Assert the required backup variables are set
+  ansible.builtin.assert:
+    that:
+      - pve_backup_drive_id | length > 0
+      - pve_backup_sa_keyfile_src | length > 0
+    fail_msg: >-
+      pve_backup needs pve_backup_drive_id (the Shared Drive ID) and
+      pve_backup_sa_keyfile_src (the path on the control node to the
+      service-account JSON key). See roles/pve_backup/defaults/main.yml.
+
+- name: Install rclone
+  ansible.builtin.apt:
+    name: rclone
+    state: present
+
+- name: Create the rclone config directory, root-only
+  ansible.builtin.file:
+    path: "{{ pve_backup_sa_keyfile_dest | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Deploy the service-account key
+  ansible.builtin.copy:
+    src: "{{ pve_backup_sa_keyfile_src }}"
+    dest: "{{ pve_backup_sa_keyfile_dest }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Write the rclone config
+  ansible.builtin.template:
+    src: rclone.conf.j2
+    dest: "{{ pve_backup_sa_keyfile_dest | dirname }}/rclone.conf"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Install the backup script
+  ansible.builtin.template:
+    src: pve-config-backup.sh.j2
+    dest: "{{ pve_backup_script_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Install the hourly cron job
+  ansible.builtin.copy:
+    dest: /etc/cron.d/pve-config-backup
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # MANAGED BY ANSIBLE — glueops.proxmox_evpn, role pve_backup.
+      SHELL=/bin/bash
+      {{ pve_backup_cron_minute }} * * * * root {{ pve_backup_script_path }}
+
+- name: Run one backup now to validate the credentials and the remote
+  ansible.builtin.command: "{{ pve_backup_script_path }}"
+  changed_when: false

@@ -1,0 +1,32 @@
+---
+- name: Assert the required per-host network variables are defined
+  ansible.builtin.assert:
+    that:
+      - pve_parent_iface is defined
+      - pve_link_iface is defined
+      - pve_link_ip is defined
+      - pve_public_ip is defined
+      - pve_public_prefix is defined
+      - pve_public_gateway is defined
+    fail_msg: >-
+      pve_network needs pve_parent_iface, pve_link_iface, pve_link_ip,
+      pve_public_ip, pve_public_prefix and pve_public_gateway defined per host.
+      See roles/pve_network/defaults/main.yml for what each one means.
+
+- name: Probe NIC capabilities and derive MTUs
+  ansible.builtin.include_tasks: probe.yml
+
+- name: Derive and validate VLAN, VNI and bridge-VID ranges
+  ansible.builtin.include_tasks: derive.yml
+
+- name: Pre-flight checks against running guests
+  ansible.builtin.include_tasks: preflight.yml
+
+- name: Write and apply /etc/network/interfaces
+  ansible.builtin.include_tasks: apply.yml
+
+- name: Reconcile kernel state with the written config
+  ansible.builtin.include_tasks: reconcile.yml
+
+- name: Verify the host came back healthy
+  ansible.builtin.include_tasks: verify.yml

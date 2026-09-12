@@ -1,0 +1,187 @@
+---
+# `ifreload -a` reporting success does NOT mean the kernel matches the file.
+# Two divergences were measured repeatedly across a 37-host rollout:
+#
+#  * VLAN MEMBERSHIP IS APPLIED INCONSISTENTLY. With bridge-vids narrowed on all
+#    four bridges, the uplink and the LAN/NAT VXLAN devices took the new range on
+#    every host, while the sync device kept all 4094 VIDs on some hosts and took
+#    the new range on others — same play, same run, same config. It is not a
+#    reliable "sync is always skipped", so every port is checked rather than
+#    special-cased.
+#
+#  * EXISTING FDB ENTRIES ARE NEVER PURGED. Narrowing bounds what the kernel
+#    installs NEXT; entries already present for now-unmember VLANs stay forever.
+#    Hosts finished the rollout with the narrowed config and FDBs still at
+#    ~400k, indistinguishable from untouched hosts. A reboot clears them, and so
+#    does an explicit flush.
+#
+# Both are corrected here so this role converges the kernel, not just the file.
+
+- name: Reconcile kernel VLAN membership with the configured bridge-vids
+  ansible.builtin.shell: |
+    set -o pipefail
+    reconcile() {   # $1=dev  $2=lo-hi
+      dev=$1; lo=${2%%-*}; hi=${2##*-}
+      [ -e "/sys/class/net/$dev" ] || return 0
+      # VIDs the kernel holds, excluding PVID 1, that fall outside [lo,hi]
+      out=$(bridge vlan show dev "$dev" 2>/dev/null \
+            | grep -oE '[0-9]+' \
+            | awk -v lo="$lo" -v hi="$hi" '$1 != 1 && ($1 < lo || $1 > hi)' | sort -n -u)
+      [ -z "$out" ] && return 0
+      # Collapse to contiguous ranges so this is a handful of netlink calls,
+      # not one per VID.
+      echo "$out" | awk 'NR==1{s=$1;p=$1;next} $1==p+1{p=$1;next} {print s"-"p; s=$1;p=$1} END{print s"-"p}' \
+        | while read -r r; do bridge vlan del dev "$dev" vid "$r" 2>/dev/null || true; done
+      echo "reconciled $dev: removed $(echo "$out" | wc -l) out-of-range vids"
+    }
+    {% if 'public' not in pve_flat_bridges %}
+    reconcile {{ pve_parent_iface }} "{{ pve_public_bridge_vids | trim }}"
+    {% endif %}
+    reconcile {{ pve_vxlan_lan_dev }} "{{ pve_lan_bridge_vids | trim }}"
+    reconcile {{ pve_vxlan_nat_dev }} "{{ pve_nat_bridge_vids | trim }}"
+    {% if 'sync' not in pve_flat_bridges %}
+    reconcile {{ pve_vxlan_sync_dev }} "{{ pve_sync_bridge_vids | trim }}"
+    {% endif %}
+  args:
+    executable: /bin/bash
+  register: pve_vlan_reconcile
+  changed_when: "'reconciled' in pve_vlan_reconcile.stdout"
+  when: pve_narrow_bridge_vids | length > 0
+
+# Reconciled here rather than left to ifreload for the same reason as the VLAN
+# membership above, and because it lets the flags be applied to a guest-bearing
+# host without reloading its networking at all.
+- name: Reconcile MAC learning flags on the VXLAN devices
+  ansible.builtin.shell: |
+    set -o pipefail
+    want_dev="{{ 'on' if (pve_vxlan_learning | bool) else 'off' }}"
+    want_port="{{ 'on' if (pve_bridge_learning | bool) else 'off' }}"
+    for d in {{ pve_vxlan_lan_dev }} {{ pve_vxlan_nat_dev }} {{ pve_vxlan_sync_dev }}; do
+      [ -e "/sys/class/net/$d" ] || continue
+      have_dev=on; ip -d link show "$d" | grep -qw nolearning && have_dev=off
+      have_port=$(cat "/sys/class/net/$d/brport/learning" 2>/dev/null)
+      [ "$have_port" = "1" ] && have_port=on || have_port=off
+      if [ "$have_dev" != "$want_dev" ]; then
+        [ "$want_dev" = on ] && ip link set dev "$d" type vxlan learning \
+                             || ip link set dev "$d" type vxlan nolearning
+        echo "changed $d vxlan-learning $have_dev -> $want_dev"
+      fi
+      if [ "$have_port" != "$want_port" ]; then
+        bridge link set dev "$d" learning "$want_port"
+        echo "changed $d bridge-learning $have_port -> $want_port"
+      fi
+    done
+  args:
+    executable: /bin/bash
+  register: pve_learning_reconcile
+  changed_when: "'changed' in pve_learning_reconcile.stdout"
+
+# ifreload does not reliably flip vlan_filtering to 0 on a bridge declared flat.
+# Observed: the same bridge flattened on one host and not on another, the
+# difference being a live PVE guest tap attached to it — ifupdown2 will not
+# change vlan_filtering out from under a port it does not manage.
+#
+# The reconcile above deliberately SKIPS flat bridges (a flat bridge has no VLAN
+# table to reconcile), so without this the divergence is silent and permanent:
+# the file says vlan-aware no, the kernel keeps filtering on with all 4094 VIDs.
+- name: Detect bridges declared flat that the kernel still has vlan_filtering on
+  ansible.builtin.shell: |
+    set -o pipefail
+    for b in {{ pve_flat_bridges | map('extract', {'public': pve_bridge_public, 'sync': pve_bridge_sync}) | join(' ') }}; do
+      f="/sys/class/net/$b/bridge/vlan_filtering"
+      [ -e "$f" ] || continue
+      [ "$(cat "$f")" = "0" ] || echo "$b"
+    done
+  args:
+    executable: /bin/bash
+  changed_when: false
+  check_mode: false
+  register: pve_unflattened
+  when: pve_flat_bridges | length > 0
+
+- name: Enforce bridge-vlan-aware no where ifreload did not apply it
+  ansible.builtin.shell: |
+    set -o pipefail
+    for b in {{ pve_unflattened.stdout_lines | join(' ') }}; do
+      ip link set dev "$b" type bridge vlan_filtering 0 && echo "flattened $b"
+    done
+  args:
+    executable: /bin/bash
+  register: pve_flatten_fix
+  changed_when: "'flattened' in pve_flatten_fix.stdout"
+  when:
+    - pve_flat_bridges | length > 0
+    - (pve_unflattened.stdout | default('') | trim) != ''
+    - (pve_running_guests.stdout | default('0') | trim | int) == 0
+      or not (pve_fdb_flush_requires_empty | bool)
+
+- name: Warn that a flat bridge is still vlan-filtering
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: {{ pve_unflattened.stdout_lines | join(', ') }}
+      {{ 'is' if (pve_unflattened.stdout_lines | length) == 1 else 'are' }}
+      configured `bridge-vlan-aware no` but the kernel still has
+      vlan_filtering=1 — ifreload could not change it with a live guest tap
+      attached, and {{ pve_running_guests.stdout | trim }} guest(s) are running
+      so it was not forced. The bridge still works; it just keeps the full VID
+      fan-out. Fixed by a reboot of this host, or by re-running with
+      -e pve_fdb_flush_requires_empty=false during a change window.
+  when:
+    - pve_flat_bridges | length > 0
+    - (pve_unflattened.stdout | default('') | trim) != ''
+    - (pve_running_guests.stdout | default('0') | trim | int) > 0
+    - pve_fdb_flush_requires_empty | bool
+
+- name: Count FDB entries stranded in VLANs outside the configured range
+  ansible.builtin.shell: |
+    set -o pipefail
+    total=0
+    for spec in "{{ pve_vxlan_lan_dev }} {{ pve_lan_bridge_vids | trim }}" \
+                "{{ pve_vxlan_nat_dev }} {{ pve_nat_bridge_vids | trim }}" \
+                "{{ pve_vxlan_sync_dev }} {{ pve_sync_bridge_vids | trim }}"; do
+      set -- $spec; dev=$1; lo=${2%%-*}; hi=${2##*-}
+      [ -e "/sys/class/net/$dev" ] || continue
+      n=$(bridge fdb show dev "$dev" 2>/dev/null | grep -oE 'vlan [0-9]+' \
+          | awk -v lo="$lo" -v hi="$hi" '{v=$2; if (v != 1 && (v < lo || v > hi)) c++} END{print c+0}')
+      total=$((total + n))
+    done
+    echo "$total"
+  args:
+    executable: /bin/bash
+  changed_when: false
+  check_mode: false
+  register: pve_stale_fdb
+  when: pve_narrow_bridge_vids | length > 0
+
+# The flush is momentarily disruptive: entries vanish and FRR reinstalls them
+# over the next few seconds, so a guest on this host floods or blackholes until
+# it does. Refused by default while any guest is running. The host is still left
+# correct on disk and in VLAN membership; only the eviction waits.
+- name: Flush stranded FDB entries on the VXLAN devices
+  ansible.builtin.shell: |
+    for d in {{ pve_vxlan_lan_dev }} {{ pve_vxlan_nat_dev }} {{ pve_vxlan_sync_dev }}; do
+      [ -e "/sys/class/net/$d" ] && bridge fdb flush dev "$d" master
+    done
+  args:
+    executable: /bin/bash
+  changed_when: true
+  when:
+    - pve_narrow_bridge_vids | length > 0
+    - (pve_stale_fdb.stdout | default('0') | trim | int) > 0
+    - (pve_running_guests.stdout | default('0') | trim | int) == 0
+      or not (pve_fdb_flush_requires_empty | bool)
+
+- name: Warn that stranded FDB entries were left in place
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} still holds {{ pve_stale_fdb.stdout | trim }} FDB
+      entries in VLANs outside the configured bridge-vids, but
+      {{ pve_running_guests.stdout | trim }} guest(s) are running so the flush
+      was skipped. They are harmless but never expire. Clear them at the next
+      reboot of this host, or re-run with -e pve_fdb_flush_requires_empty=false
+      during a change window.
+  when:
+    - pve_narrow_bridge_vids | length > 0
+    - (pve_stale_fdb.stdout | default('0') | trim | int) > 0
+    - (pve_running_guests.stdout | default('0') | trim | int) > 0
+    - pve_fdb_flush_requires_empty | bool

@@ -1,0 +1,36 @@
+---
+# Install and configure FRR for BGP-EVPN.
+#
+#   ansible-playbook glueops.proxmox_evpn.evpn
+#
+# Run the network play first (or after) to bring the kernel into the EVPN-aware
+# shape FRR expects.
+#
+# Split into two plays on purpose:
+#
+#   1. Route reflectors, serial: 1. Clients peer ONLY with the reflectors, so if
+#      both restart FRR at the same moment every client loses all EVPN state at
+#      once. Where bridge-learning is off there is no data-plane fallback, which
+#      makes that a fleet-wide tenant traffic blip. Two reflectors exist
+#      precisely so one can be taken at a time; serial: 1 enforces it.
+#
+#   2. Everyone else, in parallel. A leaf restarting FRR affects only its own
+#      VXLAN state, so there is nothing to serialise and no reason to pay for
+#      dozens of sequential convergence waits.
+#
+# Note that serial: 1 deliberately does NOT apply to the whole fleet. Doing that
+# would serialise every client for no benefit and make a first bring-up worse.
+- name: Configure FRR on the route reflectors (one at a time — never drop both)
+  hosts: "{{ pve_route_reflector_group | default('pve_route_reflectors') }}"
+  serial: 1
+  gather_facts: false
+  roles:
+    - role: glueops.proxmox_evpn.pve_evpn
+
+- name: Configure FRR on the reflector clients (parallel — leaf restarts are independent)
+  hosts: >-
+    {{ (pve_fleet_group | default('pve_nodes')) ~ ':!' ~
+       (pve_route_reflector_group | default('pve_route_reflectors')) }}
+  gather_facts: false
+  roles:
+    - role: glueops.proxmox_evpn.pve_evpn

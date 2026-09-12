@@ -1,0 +1,15 @@
+# MANAGED BY ANSIBLE — glueops.proxmox_evpn, role pve_zabbix.
+
+PidFile=/run/zabbix/zabbix_agent2.pid
+LogFile=/var/log/zabbix/zabbix_agent2.log
+LogFileSize=0
+
+Server={{ pve_monitoring_server }}
+ServerActive={{ pve_monitoring_server }}
+Hostname={{ pve_zabbix_hostname }}
+HostMetadata={{ pve_zabbix_host_metadata }}
+
+ControlSocket=/run/zabbix/agent.sock
+
+Include=./zabbix_agent2.d/plugins.d/*.conf
+Include=/etc/zabbix/zabbix_agent2.d/*.conf

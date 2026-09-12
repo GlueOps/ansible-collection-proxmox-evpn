@@ -1,0 +1,118 @@
+---
+- name: Validate pve_narrow_bridge_vids
+  ansible.builtin.assert:
+    that:
+      - pve_narrow_bridge_vids is sequence
+      - pve_narrow_bridge_vids is not string
+      - (pve_narrow_bridge_vids | difference(['lan', 'nat', 'sync', 'public'])) | length == 0
+    fail_msg: >-
+      pve_narrow_bridge_vids must be a list drawn from [lan, nat, sync, public]
+      — got {{ pve_narrow_bridge_vids | to_json }}. A bare `true` would narrow
+      NOTHING silently, so it is refused. From the CLI use
+      -e '{"pve_narrow_bridge_vids":["lan","nat"]}'.
+
+# Only public/sync may be declared flat. lan/nat carry per-tenant 802.1Q tags by
+# definition — rendering either non-vlan-aware would drop every tenant's
+# traffic, so it is refused rather than documented.
+- name: Validate pve_flat_bridges
+  ansible.builtin.assert:
+    that:
+      - pve_flat_bridges is sequence
+      - pve_flat_bridges is not string
+      - (pve_flat_bridges | difference(['sync', 'public'])) | length == 0
+    fail_msg: >-
+      pve_flat_bridges must be a list drawn from [sync, public] — got
+      {{ pve_flat_bridges | to_json }}. The LAN and NAT bridges carry per-tenant
+      VLAN tags and can never be flat.
+
+# A flat sync bridge under the SVD model is a silent layer-2 outage: the sync
+# VXLAN's egress VNI comes from `bridge-vlan-vni-map 1=<vni>`, keyed on the
+# frame being classified into VLAN 1, and a non-vlan-aware bridge never assigns
+# a VLAN. The control plane reports perfect health while nothing forwards.
+- name: Refuse a flat sync bridge under the per-VLAN VNI model
+  ansible.builtin.assert:
+    that:
+      - not ('sync' in pve_flat_bridges)
+    fail_msg: >-
+      pve_flat_bridges contains 'sync' while pve_per_vlan_vni is true. Under the
+      single-VXLAN-device model the sync VXLAN takes its egress VNI from a
+      VLAN-keyed tunnel map that a flat bridge never populates — every frame is
+      dropped, and FRR still reports the VNI bound with all remote VTEPs
+      present. Remove 'sync' from pve_flat_bridges, or set pve_per_vlan_vni
+      false.
+  when: pve_per_vlan_vni | bool
+
+# Ranges mirror whatever provisions your tenants: LAN vlan = base + index,
+# NAT vlan = base + index, index in [1, pve_max_tenant_index].
+- name: Derive per-VLAN VNI ranges from the tenant numbering scheme
+  ansible.builtin.set_fact:
+    pve_lan_vlan_first: "{{ (pve_lan_vlan_base | int) + 1 }}"
+    pve_lan_vlan_last: "{{ (pve_lan_vlan_base | int) + (pve_max_tenant_index | int) }}"
+    pve_nat_vlan_first: "{{ (pve_nat_vlan_base | int) + 1 }}"
+    pve_nat_vlan_last: "{{ (pve_nat_vlan_base | int) + (pve_max_tenant_index | int) }}"
+    pve_lan_vni_first: "{{ (pve_lan_vni_base | int) + (pve_lan_vlan_base | int) + 1 }}"
+    pve_lan_vni_last: "{{ (pve_lan_vni_base | int) + (pve_lan_vlan_base | int) + (pve_max_tenant_index | int) }}"
+    pve_nat_vni_first: "{{ (pve_nat_vni_base | int) + (pve_nat_vlan_base | int) + 1 }}"
+    pve_nat_vni_last: "{{ (pve_nat_vni_base | int) + (pve_nat_vlan_base | int) + (pve_max_tenant_index | int) }}"
+
+- name: Derive bridge VID ranges
+  ansible.builtin.set_fact:
+    pve_lan_bridge_vids: >-
+      {{ (pve_lan_vlan_first ~ '-' ~ pve_lan_vlan_last)
+         if ('lan' in pve_narrow_bridge_vids) else '2-4094' }}
+    pve_nat_bridge_vids: >-
+      {{ (pve_nat_vlan_first ~ '-' ~ pve_nat_vlan_last)
+         if ('nat' in pve_narrow_bridge_vids) else '2-4094' }}
+    # sync/public carry no tenant tags, so there is no scheme to derive from.
+    # They stay vlan-aware (PVE expects it) with a token range; untagged traffic
+    # rides PVID 1, which is outside bridge-vids either way.
+    pve_sync_bridge_vids: >-
+      {{ pve_untagged_bridge_vids
+         if ('sync' in pve_narrow_bridge_vids) else '2-4094' }}
+    pve_public_bridge_vids: >-
+      {{ pve_untagged_bridge_vids
+         if ('public' in pve_narrow_bridge_vids) else '2-4094' }}
+
+# A silently-wrong VNI map is the failure mode this whole model exists to
+# prevent, so refuse to render one. These catch range inversion, collision
+# between the two bridges' VNI spaces, and VLAN IDs outside 802.1Q.
+- name: Validate the derived VLAN and VNI ranges
+  ansible.builtin.assert:
+    that:
+      - (pve_lan_vlan_first | int) >= 2
+      - (pve_nat_vlan_first | int) >= 2
+      - (pve_lan_vlan_last | int) <= 4094
+      - (pve_nat_vlan_last | int) <= 4094
+      - (pve_lan_vni_last | int) < (pve_nat_vni_first | int) or (pve_nat_vni_last | int) < (pve_lan_vni_first | int)
+      - (pve_lan_vni_base | int) != (pve_nat_vni_base | int)
+    fail_msg: >-
+      Derived VLAN/VNI ranges are unusable —
+      LAN vlan {{ pve_lan_vlan_first }}-{{ pve_lan_vlan_last }} ->
+      vni {{ pve_lan_vni_first }}-{{ pve_lan_vni_last }},
+      NAT vlan {{ pve_nat_vlan_first }}-{{ pve_nat_vlan_last }} ->
+      vni {{ pve_nat_vni_first }}-{{ pve_nat_vni_last }}.
+      VNI ranges must not overlap and VLANs must be within 2-4094.
+  when: pve_per_vlan_vni | bool
+
+- name: Show planned VLAN to VNI mapping
+  ansible.builtin.debug:
+    msg:
+      lan: "vlan {{ pve_lan_vlan_first }}-{{ pve_lan_vlan_last }} -> vni {{ pve_lan_vni_first }}-{{ pve_lan_vni_last }}"
+      nat: "vlan {{ pve_nat_vlan_first }}-{{ pve_nat_vlan_last }} -> vni {{ pve_nat_vni_first }}-{{ pve_nat_vni_last }}"
+      sync: "vlan 1 -> vni {{ pve_vxlan_sync_id }}"
+      note: "this host is ISOLATED from any host not sharing these VNIs"
+  when: pve_per_vlan_vni | bool
+
+- name: Show planned bridge VID ranges
+  ansible.builtin.debug:
+    msg:
+      narrowed: "{{ pve_narrow_bridge_vids }}"
+      flat: "{{ pve_flat_bridges }}"
+      "{{ pve_bridge_lan }}": "bridge-vids {{ pve_lan_bridge_vids | trim }}"
+      "{{ pve_bridge_nat }}": "bridge-vids {{ pve_nat_bridge_vids | trim }}"
+      "{{ pve_bridge_sync }}": >-
+        {{ 'bridge-vlan-aware no (flat)' if ('sync' in pve_flat_bridges)
+           else 'bridge-vids ' ~ (pve_sync_bridge_vids | trim) }}
+      "{{ pve_bridge_public }}": >-
+        {{ 'bridge-vlan-aware no (flat)' if ('public' in pve_flat_bridges)
+           else 'bridge-vids ' ~ (pve_public_bridge_vids | trim) }}

@@ -1,0 +1,20 @@
+---
+# apt update + dist-upgrade across the fleet. Safe to run any time.
+#
+#   ansible-playbook glueops.proxmox_evpn.upgrade
+#   ansible-playbook glueops.proxmox_evpn.upgrade -e pve_upgrade_batch=3
+#   ansible-playbook glueops.proxmox_evpn.upgrade -e pve_upgrade_auto_reboot=false
+#
+# serial: 1 — one node at a time — so the fleet stays available across kernel
+# updates that force a reboot. Raise pve_upgrade_batch when you do not care
+# about temporary parallel outages.
+#
+# To reboot a host that has running guests, fail its guests over first, then run
+# that host with -e pve_upgrade_reboot_requires_empty=false.
+- name: Apt update and dist-upgrade
+  hosts: "{{ pve_fleet_group | default('pve_nodes') }}"
+  become: true
+  gather_facts: false
+  serial: "{{ pve_upgrade_batch | default(1) }}"
+  roles:
+    - role: glueops.proxmox_evpn.pve_upgrade

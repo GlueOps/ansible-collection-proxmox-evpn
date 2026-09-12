@@ -1,0 +1,28 @@
+---
+# Configure host networking: bridges, VXLAN devices and the underlay NIC.
+# This play is the canonical owner of /etc/network/interfaces.
+#
+#   ansible-playbook glueops.proxmox_evpn.network
+#   ansible-playbook glueops.proxmox_evpn.network --limit hv06 --check
+#
+# serial defaults to 1 and 1 is the right answer whenever the run touches the
+# public bridge — it carries the host IP, the default route and your SSH
+# session, so recovery from a bad apply is out-of-band, not SSH. See
+# pve_bridge_batch in roles/pve_network/defaults/main.yml before raising it.
+- name: Configure PVE network
+  hosts: "{{ pve_fleet_group | default('pve_nodes') }}"
+  serial: "{{ pve_bridge_batch | default(1) }}"
+  gather_facts: false
+  roles:
+    - role: glueops.proxmox_evpn.pve_network
+
+# Separate play, deliberately: a pairwise mesh test is meaningless until BOTH
+# ends have been rewritten, so it cannot live inside a serial: 1 play.
+- name: Verify the underlay carries the configured MTU
+  hosts: "{{ pve_fleet_group | default('pve_nodes') }}"
+  gather_facts: false
+  tasks:
+    - name: Pairwise DF-ping at the configured underlay MTU
+      ansible.builtin.include_role:
+        name: glueops.proxmox_evpn.pve_network
+        tasks_from: verify_underlay_mtu.yml

@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# MANAGED BY ANSIBLE — glueops.proxmox_evpn, role pve_backup.
+#
+# Pushes selected config files and directories to a Google Shared Drive via
+# rclone. Directories are copied recursively. Missing paths are skipped, so the
+# same script is safe on hosts with different roles. Latest-snapshot semantics:
+# `rclone copy` adds and updates but never deletes, so a file removed locally
+# remains on the remote. Paths in PURGE are deleted locally once uploaded.
+set -euo pipefail
+
+RCLONE="/usr/bin/rclone --config {{ pve_backup_sa_keyfile_dest | dirname }}/rclone.conf"
+HOST="$(hostname -s)"
+BASE="{{ pve_backup_path }}"
+REMOTE="{{ pve_backup_remote_name }}:${BASE:+$BASE/}${HOST}"
+LOG="{{ pve_backup_log_path }}"
+
+FILES=(
+{% for f in pve_backup_files %}
+  "{{ f }}"
+{% endfor %}
+)
+
+# Globs whose matching files are deleted locally AFTER a confirmed upload
+# (drain semantics): the data lives on the Shared Drive, not on the host.
+PURGE=(
+{% for p in pve_backup_purge_after_upload %}
+  "{{ p }}"
+{% endfor %}
+)
+
+log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*" >>"$LOG"; }
+
+STAGE="$(mktemp -d)"
+trap 'rm -rf "$STAGE"' EXIT
+
+staged=0
+for f in "${FILES[@]}"; do
+  [ -e "$f" ] || continue
+  d="$STAGE/$(dirname "${f#/}")"
+  mkdir -p "$d"
+  cp -a "$f" "$d/"
+  staged=$((staged + 1))
+done
+
+if [ "$staged" -eq 0 ]; then
+  log "nothing to back up on ${HOST}; exiting"
+  exit 0
+fi
+
+# --copy-links dereferences symlinks into regular files. `cp -a` above stages
+# symlinks as symlinks, and rclone skips those by default with only a NOTICE —
+# so without this the upload silently omits them. A netboot tree, for instance,
+# is mostly symlinks into a loader directory, and a restore missing them will
+# not PXE boot. Targets are small and resolve inside the backup set, so
+# dereferencing duplicates very little.
+log "backup start -> ${REMOTE} (${staged} entries)"
+if $RCLONE copy --copy-links "$STAGE" "$REMOTE" >>"$LOG" 2>&1; then
+  log "backup done"
+else
+  log "ERROR: rclone copy failed (rc=$?)"
+  exit 1
+fi
+
+# Drain: only remove a local file if its staged copy was part of THIS upload.
+# A file written after staging has no staged copy, so it survives for the next
+# run instead of being deleted unsent.
+purged=0
+for pat in "${PURGE[@]}"; do
+  for victim in $pat; do
+    [ -f "$victim" ] || continue
+    [ -f "$STAGE/${victim#/}" ] || continue
+    rm -f "$victim" && purged=$((purged + 1))
+  done
+done
+# An `&&` list as the final command would make the script exit 1 whenever
+# nothing was purged — the normal case on most hosts. Use an if-block so the
+# exit status stays 0.
+if [ "$purged" -gt 0 ]; then
+  log "purged ${purged} local file(s) after upload"
+fi

@@ -1,0 +1,50 @@
+! MANAGED BY ANSIBLE — glueops.proxmox_evpn, role pve_evpn.
+! Local edits are overwritten on the next run.
+frr defaults traditional
+hostname {{ inventory_hostname }}
+log syslog informational
+service integrated-vtysh-config
+!
+router bgp {{ pve_bgp_asn }}
+ bgp router-id {{ pve_local_link_ip }}
+ no bgp default ipv4-unicast
+{% if pve_is_route_reflector %}
+ ! Role: route reflector
+ neighbor RR_PEER peer-group
+ neighbor RR_PEER remote-as {{ pve_bgp_asn }}
+ neighbor RR_PEER timers {{ pve_bgp_keepalive }} {{ pve_bgp_holdtime }}
+ neighbor RR_CLIENT peer-group
+ neighbor RR_CLIENT remote-as {{ pve_bgp_asn }}
+ neighbor RR_CLIENT timers {{ pve_bgp_keepalive }} {{ pve_bgp_holdtime }}
+{% for peer_host in pve_bgp_peer_hosts %}
+{%   set peer_ip = hostvars[peer_host].pve_link_ip | split('/') | first %}
+{%   if peer_host in pve_rr_client_hosts %}
+ neighbor {{ peer_ip }} peer-group RR_CLIENT
+{%   else %}
+ neighbor {{ peer_ip }} peer-group RR_PEER
+{%   endif %}
+ neighbor {{ peer_ip }} description {{ peer_host }}
+{% endfor %}
+{% else %}
+ ! Role: {{ "RR client" if (groups.get(pve_route_reflector_group, []) | length > 0) else "full-mesh peer" }}
+ neighbor PVE peer-group
+ neighbor PVE remote-as {{ pve_bgp_asn }}
+ neighbor PVE timers {{ pve_bgp_keepalive }} {{ pve_bgp_holdtime }}
+{% for peer_host in pve_bgp_peer_hosts %}
+{%   set peer_ip = hostvars[peer_host].pve_link_ip | split('/') | first %}
+ neighbor {{ peer_ip }} peer-group PVE
+ neighbor {{ peer_ip }} description {{ peer_host }}
+{% endfor %}
+{% endif %}
+ !
+ address-family l2vpn evpn
+{% if pve_is_route_reflector %}
+  neighbor RR_PEER activate
+  neighbor RR_CLIENT activate
+  neighbor RR_CLIENT route-reflector-client
+{% else %}
+  neighbor PVE activate
+{% endif %}
+  advertise-all-vni
+ exit-address-family
+!

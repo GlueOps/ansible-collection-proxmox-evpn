@@ -1,0 +1,130 @@
+---
+- name: Check whether zabbix-release is already installed
+  ansible.builtin.command: dpkg-query -W -f='${Version}' zabbix-release
+  register: pve_zbx_release_pkg
+  failed_when: false
+  changed_when: false
+
+- name: Download the Zabbix release package
+  ansible.builtin.get_url:
+    url: "{{ pve_zabbix_release_url }}"
+    dest: "/tmp/{{ pve_zabbix_release_deb }}"
+    mode: "0644"
+  when: pve_zbx_release_pkg.rc != 0
+
+- name: Install zabbix-release (adds the APT source)
+  ansible.builtin.apt:
+    deb: "/tmp/{{ pve_zabbix_release_deb }}"
+    state: present
+  when: pve_zbx_release_pkg.rc != 0
+  register: pve_zbx_release_install
+
+- name: Refresh the APT cache after adding the Zabbix repo
+  ansible.builtin.apt:
+    update_cache: true
+  when: pve_zbx_release_install is changed
+
+- name: Install zabbix-agent2, ipmitool, jq and sudo
+  ansible.builtin.apt:
+    name:
+      - zabbix-agent2
+      - ipmitool
+      # jq is used by the LLD helper to emit discovery JSON.
+      - jq
+      # sudo is NOT a given: a minimal Debian install omits it entirely (root
+      # password instead of an admin sudo user). Two things here need it — the
+      # helper calls `sudo -n /usr/bin/ipmitool`, and the sudoers drop-in below
+      # is gated on `visudo -cf`, which fails with a bare rc=2 and no stderr
+      # when /usr/sbin/visudo does not exist.
+      - sudo
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create the IPMI cache directory owned by zabbix
+  ansible.builtin.file:
+    path: "{{ pve_zabbix_cache_dir }}"
+    state: directory
+    owner: zabbix
+    group: zabbix
+    mode: "0755"
+  when: pve_zabbix_manage_ipmi | bool
+
+- name: Install the IPMI helper script
+  ansible.builtin.template:
+    src: zbx-ipmi.j2
+    dest: "{{ pve_zabbix_helper }}"
+    owner: root
+    group: root
+    mode: "0755"
+  when: pve_zabbix_manage_ipmi | bool
+
+- name: Allow the zabbix user to run ipmitool via sudo, without a password
+  # Scoped to one binary. The helper script is the only consumer;
+  # UserParameters never invoke ipmitool directly, which keeps the sudo surface
+  # auditable.
+  ansible.builtin.copy:
+    dest: "{{ pve_zabbix_sudoers }}"
+    owner: root
+    group: root
+    mode: "0440"
+    content: |
+      # MANAGED BY ANSIBLE — glueops.proxmox_evpn, role pve_zabbix.
+      zabbix ALL=(root) NOPASSWD: /usr/bin/ipmitool
+    validate: /usr/sbin/visudo -cf %s
+  when: pve_zabbix_manage_ipmi | bool
+
+- name: Install the IPMI cache refresh cron job
+  ansible.builtin.copy:
+    dest: /etc/cron.d/zbx-ipmi-refresh
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # MANAGED BY ANSIBLE — glueops.proxmox_evpn, role pve_zabbix.
+      # Refreshes the IPMI caches every minute so the agent's UserParameters
+      # serve cache reads with no ipmitool invocation in the request path.
+      # Non-blocking flock inside the helper means overlapping ticks no-op.
+      SHELL=/bin/bash
+      PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      * * * * * zabbix {{ pve_zabbix_helper }} refresh-all >/dev/null 2>&1
+  when: pve_zabbix_manage_ipmi | bool
+
+- name: Prime the IPMI caches now
+  # Don't wait for the first cron tick, or the verification below reports zero
+  # sensors on a freshly built host.
+  ansible.builtin.command:
+    argv:
+      - sudo
+      - -u
+      - zabbix
+      - "{{ pve_zabbix_helper }}"
+      - refresh-all
+  changed_when: false
+  failed_when: false
+  when: pve_zabbix_manage_ipmi | bool
+
+- name: Install the IPMI UserParameters
+  ansible.builtin.template:
+    src: ipmi-userparams.conf.j2
+    dest: "{{ pve_zabbix_userparam }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: pve_zabbix_manage_ipmi | bool
+  notify: restart zabbix-agent2
+
+- name: Write the agent configuration
+  ansible.builtin.template:
+    src: zabbix_agent2.conf.j2
+    dest: "{{ pve_zabbix_conf }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart zabbix-agent2
+
+- name: Enable and start zabbix-agent2
+  ansible.builtin.systemd:
+    name: zabbix-agent2
+    enabled: true
+    state: started

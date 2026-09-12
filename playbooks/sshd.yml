@@ -1,0 +1,9 @@
+---
+# Tune sshd for concurrent automation.
+#
+#   ansible-playbook glueops.proxmox_evpn.sshd
+- name: Tune sshd for fleet automation
+  hosts: "{{ pve_fleet_group | default('pve_nodes') }}"
+  gather_facts: false
+  roles:
+    - role: glueops.proxmox_evpn.pve_sshd

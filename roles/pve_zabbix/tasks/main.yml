@@ -1,0 +1,21 @@
+---
+- name: Refuse to run without a monitoring server configured
+  ansible.builtin.assert:
+    that:
+      - pve_monitoring_server | length > 0
+    fail_msg: >-
+      pve_monitoring_server must be set — the agent needs somewhere to send both
+      passive and active checks. The pve_firewall role reads the same variable.
+
+- name: Configure IPMI kernel modules and helper
+  ansible.builtin.include_tasks: ipmi.yml
+  when: pve_zabbix_manage_ipmi | bool
+
+- name: Install the Zabbix repository and agent
+  ansible.builtin.include_tasks: agent.yml
+
+- name: Apply any pending restarts
+  ansible.builtin.meta: flush_handlers
+
+- name: Verify the installation
+  ansible.builtin.include_tasks: verify.yml

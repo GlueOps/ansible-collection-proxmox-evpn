@@ -1,0 +1,63 @@
+---
+# ===========================================================================
+# pve_firewall — host iptables policy
+# ===========================================================================
+#
+# Three independent concerns, each selectable by tag:
+#   dhcp    drop DHCP offers arriving from the public wire
+#   zabbix  scope the monitoring agent port to the monitoring server
+#   ssh     whitelist port 22 to the fleet plus named operator sources
+#
+# Assumes iptables-persistent is already installed (the proxmox_install role
+# does it as part of the baseline).
+
+# --- Inventory group names -------------------------------------------------
+pve_fleet_group: pve_nodes
+pve_dhcp_server_group: pve_dhcp_servers
+
+# --- Shared ----------------------------------------------------------------
+# Interface exempted from every whitelist jump, so an out-of-band mesh (a
+# Tailscale/WireGuard/ZeroTier interface) is never filtered and cannot lock you
+# out. Set to "" to apply the whitelists to all interfaces — do that only if you
+# are certain of your recovery path.
+pve_firewall_exempt_iface: tailscale0
+
+# --- DHCP filter (tag: dhcp) -----------------------------------------------
+# Hosts in pve_dhcp_server_group run a DHCP server for their guests. Guest
+# frames arrive over tap interfaces; a DHCP request arriving on the PUBLIC
+# uplink came from the colo wire and must never be answered. The rule matches on
+# the bridge's physical ingress port, which is why it is raw iptables and not
+# the ansible.builtin.iptables module — that module does not expose -m physdev.
+pve_firewall_manage_dhcp: true
+pve_dhcp_filter_port: 67
+
+# --- Monitoring agent port (tag: zabbix) -----------------------------------
+# REQUIRED when the zabbix tag runs. Resolved at apply time and the resulting
+# addresses become the only sources allowed to reach the agent port. The role
+# refuses to install an empty whitelist if the lookup fails.
+pve_monitoring_server: ""
+pve_monitoring_agent_port: 10050
+pve_monitoring_chain: pve-zabbix-whitelist
+
+# --- SSH whitelist (tags: ssh, confirm) ------------------------------------
+pve_ssh_chain: pve-ssh-whitelist
+pve_ssh_port: 22
+
+# Extra CIDRs allowed to reach the SSH port on the public uplink. Every fleet
+# host's public and underlay /32 is derived from the inventory and added
+# automatically — list only external sources here (operator workstation, jump
+# host, CI runner).
+#
+# MUST be defined explicitly, even as [], before the ssh tag will run. That is a
+# lockout guard: the operator has to state which non-fleet sources keep access.
+# Set [] if your out-of-band mesh is the only direct path.
+#
+# Keep one entry per line with an owner comment. An unattributed address here
+# can never be safely pruned, because nobody can tell whether removing it locks
+# something out.
+# pve_ssh_whitelist_extra: []
+
+# Source addresses considered already-safe when deciding whether to pause for
+# confirmation. Defaults to the CGNAT range Tailscale assigns, since a session
+# arriving from there is on the exempted interface and unaffected by the chain.
+pve_ssh_trusted_source_regex: '^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.'

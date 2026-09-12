@@ -1,0 +1,43 @@
+---
+namespace: glueops
+name: proxmox_evpn
+version: 1.0.0
+readme: README.md
+
+authors:
+  - GlueOps
+
+description: >-
+  Build and operate Proxmox VE hypervisor fleets with a BGP-EVPN / VXLAN tenant
+  fabric driven by FRR. Host networking, per-VLAN VNI mapping, bridge FDB
+  control, host firewall, config backup, monitoring and fleet patching.
+
+license:
+  - Apache-2.0
+
+tags:
+  - proxmox
+  - pve
+  - vxlan
+  - evpn
+  - bgp
+  - frr
+  - networking
+  - virtualization
+  - debian
+  - infrastructure
+
+dependencies:
+  "ansible.posix": ">=1.5.0"
+  "community.general": ">=7.0.0"
+
+repository: https://github.com/GlueOps/ansible-collection-proxmox-evpn
+documentation: https://github.com/GlueOps/ansible-collection-proxmox-evpn/blob/main/README.md
+homepage: https://github.com/GlueOps/ansible-collection-proxmox-evpn
+issues: https://github.com/GlueOps/ansible-collection-proxmox-evpn/issues
+
+build_ignore:
+  - .github
+  - .gitignore
+  - .ansible-lint
+  - "*.tar.gz"
