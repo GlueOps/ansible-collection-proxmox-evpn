@@ -1,0 +1,36 @@
+---
+# Full bring-up, in dependency order.
+#
+#   ansible-playbook glueops.proxmox_evpn.site
+#
+# Each stage is also a standalone playbook — run them individually when you are
+# changing one thing rather than building a host from scratch. Passwords are NOT
+# included here, because that playbook prompts and this one is meant to be
+# runnable unattended.
+#
+# Order matters:
+#   install   must precede everything (it provides the kernel and the packages)
+#   network   must precede evpn (FRR discovers locally configured VNIs, so the
+#             VXLAN devices have to exist before it looks)
+#   firewall  should follow zabbix, so the agent port whitelist is installed
+#             against an agent that is already listening
+- name: Install Proxmox VE
+  ansible.builtin.import_playbook: install.yml
+
+- name: Configure host networking
+  ansible.builtin.import_playbook: network.yml
+
+- name: Configure the BGP-EVPN control plane
+  ansible.builtin.import_playbook: evpn.yml
+
+- name: Tune sshd for automation
+  ansible.builtin.import_playbook: sshd.yml
+
+- name: Install the monitoring agent
+  ansible.builtin.import_playbook: zabbix.yml
+
+- name: Configure the host firewall
+  ansible.builtin.import_playbook: firewall.yml
+
+- name: Configure config backup
+  ansible.builtin.import_playbook: backup.yml

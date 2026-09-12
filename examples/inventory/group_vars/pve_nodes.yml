@@ -1,0 +1,113 @@
+---
+# Example fleet-wide variables. Copy into your private inventory repository and
+# edit. Everything here has a default in the collection's roles; this file is
+# where you state the ones that are site-specific or that you want to be able to
+# read back later without going and looking at the roles.
+
+# SSH key for THIS fleet. Deliberately here rather than as private_key_file in
+# ansible.cfg: the key and the inventory have to match, and keeping them in one
+# file makes a mismatch impossible.
+ansible_ssh_private_key_file: ~/.ssh/example_fleet
+
+# ===========================================================================
+# Networking (role: pve_network)
+# ===========================================================================
+
+# Underlay MTU target. The role probes the NIC's maxmtu and uses
+# min(this, nic_maxmtu); VXLAN and bridge MTUs derive at effective-50.
+#
+# Raise above 1500 ONLY after DF-pinging the switch path at the new size —
+# nothing on the host can detect a switch port that will not carry it. Get this
+# wrong and the fabric ARPs and pings perfectly and fails only on large frames.
+#
+# 1500 here yields a 1450 inner MTU, which tenant guests must be lowered to
+# match. 1550 yields a clean 1500 inner MTU and guests need no tuning — but the
+# switch ports have to carry 1550, which is a property of your colo, not a
+# choice you can make here.
+pve_underlay_target_mtu: 1500
+
+# VXLAN VNIs for the legacy one-VNI-per-bridge model. Must match fleet-wide.
+pve_vxlan_lan_id: 10001
+pve_vxlan_nat_id: 10002
+pve_vxlan_sync_id: 10003
+
+# --- Per-VLAN VNI ----------------------------------------------------------
+# false = one VNI per bridge, with every tenant VLAN inside it.
+# true  = one VNI per tenant VLAN. See docs/per-vlan-vni.md; read it before
+#         flipping this, because a partial rollout isolates hosts from
+#         each other and the control plane reports perfect health throughout.
+pve_per_vlan_vni: false
+
+# Tenant VLAN numbering. If another system provisions your tenants, these MUST
+# mirror it — a tenant above the provisioned range gets a VLAN with no VNI and
+# fails silently. Treat any change as a coupled change.
+pve_lan_vlan_base: 100        # LAN vlan  = base + tenant index
+pve_nat_vlan_base: 200        # NAT vlan  = base + tenant index
+pve_max_tenant_index: 120     # the provisioner's ceiling, not the tenant count
+pve_lan_vni_base: 10000       # VLAN 101-220 -> VNI 10101-10220
+pve_nat_vni_base: 20000       # VLAN 201-320 -> VNI 20201-20320
+
+# --- Bridge VID narrowing --------------------------------------------------
+# [] keeps every bridge at 2-4094. Narrowing cuts the FDB by roughly the ratio
+# of VID counts — see docs/bridge-vid-narrowing.md for the measurements and for
+# why it is safe to stage one host at a time, unlike pve_per_vlan_vni.
+#
+# Stage it. lan and nat carry no management traffic; public holds the host IP,
+# the default gateway and the SSH path.
+pve_narrow_bridge_vids: []
+pve_untagged_bridge_vids: "2-10"
+
+# Bridges rendered `bridge-vlan-aware no`. Only [sync, public] are accepted, and
+# 'sync' is refused outright while pve_per_vlan_vni is true.
+pve_flat_bridges: []
+
+# Dataplane MAC learning. Both together or neither. Off is correct when EVPN is
+# installing MACs properly; turn both on only as a mitigation where it is not,
+# and do not let that close out the underlying fix.
+pve_vxlan_learning: false
+pve_bridge_learning: false
+
+# ===========================================================================
+# Firewall (role: pve_firewall)
+# ===========================================================================
+
+# Interface exempted from every whitelist jump. Set "" to filter all interfaces
+# — only if you are certain of your recovery path.
+pve_firewall_exempt_iface: tailscale0
+
+# Extra CIDRs allowed to reach port 22 on the public uplink. Every fleet host's
+# public and underlay /32 is derived from the inventory automatically — list
+# only external sources here.
+#
+# MUST be defined, even as [], before the ssh tag will run. That is a lockout
+# guard.
+#
+# Keep one entry per line with an owner comment. An unattributed address here
+# can never be safely pruned, because nobody can tell whether removing it locks
+# something out.
+pve_ssh_whitelist_extra:
+  # - "203.0.113.10"    # operator workstation — static, <ISP>, <country>
+  # - "203.0.113.20"    # CI runner
+  []
+
+# ===========================================================================
+# Monitoring (roles: pve_zabbix, pve_firewall)
+# ===========================================================================
+# Shared by both roles — the agent reports here, and the firewall scopes the
+# agent port to whatever this resolves to.
+pve_monitoring_server: "zabbix.example.com"
+
+# ===========================================================================
+# Config backup (role: pve_backup)
+# ===========================================================================
+# The drive and folder IDs are locations, not credentials — safe to commit.
+# The service-account key is NOT: keep it off-repo and gitignored.
+pve_backup_drive_id: ""                              # Shared Drive ID (0A...)
+pve_backup_folder_id: ""                             # folder within it
+pve_backup_sa_keyfile_src: "~/.secrets/backup-sa.json"
+
+# ===========================================================================
+# Accounts (role: pve_passwords)
+# ===========================================================================
+# A second, non-root account to rotate alongside root. Leave unset for root only.
+# pve_admin_account: "admin"

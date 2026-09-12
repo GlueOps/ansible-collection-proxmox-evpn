@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# MANAGED BY ANSIBLE — glueops.proxmox_evpn, role pve_zabbix.
+# Bridge between zabbix-agent2 UserParameters and ipmitool.
+#
+# ipmitool is NEVER invoked from the agent's request path. A cron job
+# (/etc/cron.d/zbx-ipmi-refresh) runs `refresh-all` once per minute; the
+# read-side subcommands the agent calls (discover, sensor, status, sel-count)
+# just awk over the cache files. This eliminates two failure modes that
+# otherwise kill items in bulk: concurrent /dev/ipmi0 opens racing each other,
+# and the agent's 3s UserParameter timeout firing while the helper sits blocked
+# on a lock behind a queue of refreshes.
+set -euo pipefail
+CACHE_DIR={{ pve_zabbix_cache_dir }}
+LOCK="$CACHE_DIR/ipmi.lock"
+SDR_CACHE="$CACHE_DIR/sdr.cache"
+CHASSIS_CACHE="$CACHE_DIR/chassis.cache"
+SEL_CACHE="$CACHE_DIR/sel.cache"
+
+# Atomic refresh of one cache file. On ipmitool failure the existing
+# stale-but-valid cache is preserved rather than truncated.
+cache_one() {
+  local cache="$1"; shift
+  if "$@" > "${cache}.tmp" 2>/dev/null; then
+    mv "${cache}.tmp" "$cache"
+  else
+    rm -f "${cache}.tmp"
+  fi
+}
+
+case "${1:-}" in
+  refresh-all)
+    # Called by cron every minute. Non-blocking flock means an overlapping
+    # invocation (BMC slow, previous tick still running) exits cleanly instead
+    # of piling up.
+    exec 9>>"$LOCK"
+    flock -xn 9 || exit 0
+    cache_one "$SDR_CACHE"     sudo -n /usr/bin/ipmitool sdr elist
+    cache_one "$CHASSIS_CACHE" sudo -n /usr/bin/ipmitool chassis status
+    cache_one "$SEL_CACHE"     sudo -n /usr/bin/ipmitool sel info
+    flock -u 9
+    ;;
+  discover)
+    [[ -s "$SDR_CACHE" ]] || { echo '{"data":[]}'; exit 0; }
+    # sdr elist columns: name | hex | status | entity | reading
+    # Filter to sensors whose reading is numeric ("41 degrees C", "5040 RPM",
+    # "12.0 Volts"). Discrete-state sensors ("State Deasserted", "Present",
+    # "Connected") are dropped here so they never become Zabbix items —
+    # chassis-level discrete monitoring is covered by the ipmi.chassis[*] keys.
+    awk -F'|' '
+      { for (i=1;i<=NF;i++) { gsub(/^ +| +$/,"",$i) } }
+      NF >= 5 {
+        split($5, a, " ")
+        if (a[1] ~ /^-?[0-9.]+$/) {
+          printf("%s\t%s\t%s\n", $1, $3, $4)
+        }
+      }
+    ' "$SDR_CACHE" | jq -Rn '
+      [inputs | split("\t")
+       | {"{% raw %}{#SENSOR}{% endraw %}": .[0], "{% raw %}{#STATUS}{% endraw %}": .[1], "{% raw %}{#ENTITY}{% endraw %}": .[2]}]
+      | {data: .}
+    '
+    ;;
+  sensor)
+    [[ -s "$SDR_CACHE" ]] || exit 0
+    name="${2:?sensor name required}"
+    awk -F'|' -v n="$name" '
+      { for (i=1;i<=NF;i++) { gsub(/^ +| +$/,"",$i) } }
+      $1 == n { split($5, a, " "); print a[1]; exit }
+    ' "$SDR_CACHE"
+    ;;
+  status)
+    # `ipmitool chassis status` pads field names with trailing spaces for
+    # alignment ("System Power         : on"). Split on the colon and strip
+    # whitespace from both halves so `$1 == f` matches the bare field name.
+    [[ -s "$CHASSIS_CACHE" ]] || exit 0
+    field="${2:?chassis status field required}"
+    awk -F: -v f="$field" '
+      { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1) }
+      $1 == f { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit }
+    ' "$CHASSIS_CACHE"
+    ;;
+  sel-count)
+    [[ -s "$SEL_CACHE" ]] || exit 0
+    awk -F: '
+      { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1) }
+      $1 == "Entries" { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit }
+    ' "$SEL_CACHE"
+    ;;
+  *)
+    echo "usage: $(basename "$0") {refresh-all|discover|sensor <name>|status <field>|sel-count}" >&2
+    exit 64
+    ;;
+esac

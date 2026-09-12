@@ -1,0 +1,25 @@
+---
+# ===========================================================================
+# pve_upgrade — apt update + dist-upgrade with kernel verification
+# ===========================================================================
+
+pve_upgrade_auto_reboot: true
+pve_upgrade_reboot_timeout: 1200
+
+# Refuse to reboot a host that still has a running VM or container.
+#
+# Default true so an unattended fleet-wide run can never drop a reboot on top of
+# a live guest. It is a guard, not a policy statement: a host that legitimately
+# always runs a guest (one half of an HA firewall pair, say) is not
+# un-rebootable — it is rebootable once you have failed over to its peer. Do
+# that, then run with pve_upgrade_reboot_requires_empty=false for that host.
+#
+# When this guard suppresses a reboot the run does NOT fail; it reports the host
+# as still needing one, so a fleet run patches everything and hands you a list
+# of hosts to schedule.
+pve_upgrade_reboot_requires_empty: true
+
+# Verify that a kernel apt offered was actually installed, and that a host which
+# rebooted came back running it. Both are regression tests against silent
+# failure — see tasks/main.yml for what each one caught.
+pve_upgrade_verify_kernel: true

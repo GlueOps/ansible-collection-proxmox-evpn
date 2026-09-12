@@ -1,0 +1,168 @@
+---
+- name: Capture interfaces before install
+  ansible.builtin.set_fact:
+    pve_interfaces_before: "{{ ansible_interfaces | sort }}"
+
+# ----- Bootstrap-state precheck: detect whether this host is already on
+#       a Proxmox kernel with proxmox-ve installed. Disruptive tasks
+#       (kernel install, reboot, Debian kernel purge) are gated on these
+#       facts so the role becomes a near no-op on bootstrapped hosts.
+- name: Read current kernel
+  ansible.builtin.command: uname -r
+  register: pve_uname_r
+  changed_when: false
+
+- name: Check if proxmox-ve is installed
+  ansible.builtin.command: dpkg-query -W -f='${Status}' proxmox-ve
+  register: pve_pkg_status
+  changed_when: false
+  failed_when: false
+
+- name: Compute bootstrap facts
+  ansible.builtin.set_fact:
+    pve_on_proxmox_kernel: "{{ pve_uname_r.stdout.endswith('-pve') }}"
+    pve_package_installed: "{{ 'install ok installed' in pve_pkg_status.stdout }}"
+
+- name: Report bootstrap state
+  ansible.builtin.debug:
+    msg:
+      host: "{{ inventory_hostname }}"
+      current_kernel: "{{ pve_uname_r.stdout }}"
+      on_proxmox_kernel: "{{ pve_on_proxmox_kernel }}"
+      proxmox_ve_installed: "{{ pve_package_installed }}"
+
+- name: Set system hostname
+  ansible.builtin.hostname:
+    name: "{{ pve_hostname }}"
+  when: pve_set_hostname | bool
+
+- name: Ensure hostname resolves in /etc/hosts
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: "^{{ ansible_default_ipv4.address | regex_escape }}\\s+"
+    line: "{{ ansible_default_ipv4.address }} {{ pve_hostname }}"
+    backup: true
+  when:
+    - pve_manage_hosts_file | bool
+    - ansible_default_ipv4.address is defined
+
+- name: Install Proxmox repository key
+  ansible.builtin.get_url:
+    url: "{{ pve_key_url }}"
+    dest: "{{ pve_key_path }}"
+    mode: "0644"
+
+- name: Add Proxmox VE repository
+  ansible.builtin.copy:
+    dest: "{{ pve_repo_path }}"
+    content: "{{ pve_repo_line }}\n"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Update apt cache (only when bootstrapping or kernel install pending)
+  ansible.builtin.apt:
+    update_cache: true
+  when: not pve_on_proxmox_kernel or not pve_package_installed
+
+- name: Install Proxmox kernel
+  ansible.builtin.apt:
+    name: "{{ pve_kernel_package }}"
+    state: present
+  when: not pve_on_proxmox_kernel
+
+- name: Reboot into Proxmox kernel
+  ansible.builtin.reboot:
+    msg: "Rebooting into Proxmox kernel"
+    reboot_timeout: "{{ pve_reboot_timeout }}"
+    post_reboot_delay: "{{ pve_reboot_post_delay }}"
+    test_command: uname -r
+  when: not pve_on_proxmox_kernel
+
+- name: Refresh facts after reboot
+  ansible.builtin.setup:
+  when: not pve_on_proxmox_kernel
+
+- name: Build Proxmox package list
+  ansible.builtin.set_fact:
+    pve_effective_install_packages: >-
+      {{ pve_install_packages + ([pve_postfix_package] if pve_install_postfix | bool else []) }}
+
+- name: Install Proxmox VE packages
+  ansible.builtin.apt:
+    name: "{{ pve_effective_install_packages }}"
+    state: present
+    update_cache: true
+  when: not pve_package_installed
+
+- name: Drop Proxmox enterprise apt repos
+  # proxmox-ve's post-install drops pve-enterprise / ceph apt list files. With
+  # no enterprise subscription every apt-update spams 401s, so strip them.
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ pve_drop_enterprise_repos }}"
+
+- name: Preseed iptables-persistent (skip the interactive save prompt)
+  ansible.builtin.debconf:
+    name: iptables-persistent
+    question: "iptables-persistent/{{ item }}"
+    vtype: boolean
+    value: "true"
+  loop:
+    - autosave_v4
+    - autosave_v6
+  when: pve_install_iptables_persistent | bool
+
+- name: Install iptables-persistent (rules are managed by the pve_firewall role)
+  ansible.builtin.apt:
+    name: iptables-persistent
+    state: present
+  when: pve_install_iptables_persistent | bool
+
+# ----- Debian-kernel cleanup: only when we just transitioned onto the
+#       Proxmox kernel. On already-bootstrapped hosts these were purged on
+#       the original run; re-checking burns time for no gain.
+- name: Remove Debian kernel metapackage and os-prober
+  ansible.builtin.apt:
+    name: "{{ pve_remove_packages }}"
+    state: absent
+    purge: true
+  when: not pve_package_installed
+
+- name: Find Debian kernel image packages
+  ansible.builtin.shell: "dpkg-query -W -f='${Package}\n' 'linux-image-6.*' 2>/dev/null || true"
+  register: pve_debian_kernel_packages
+  changed_when: false
+  when:
+    - pve_purge_debian_kernel_glob | bool
+    - not pve_package_installed
+
+- name: Purge Debian kernel image packages
+  ansible.builtin.apt:
+    name: "{{ pve_debian_kernel_packages.stdout_lines }}"
+    state: absent
+    purge: true
+  when:
+    - pve_purge_debian_kernel_glob | bool
+    - not pve_package_installed
+    - pve_debian_kernel_packages.stdout_lines | default([]) | length > 0
+
+- name: Autoremove unused packages
+  ansible.builtin.apt:
+    autoremove: true
+    purge: true
+  when: not pve_package_installed
+
+- name: Refresh facts after install
+  ansible.builtin.setup:
+
+- name: Return discovered interface summary
+  ansible.builtin.debug:
+    msg:
+      hostname: "{{ ansible_hostname }}"
+      fqdn: "{{ ansible_fqdn }}"
+      default_ipv4: "{{ ansible_default_ipv4 | default({}) }}"
+      interfaces_before: "{{ pve_interfaces_before }}"
+      interfaces_after: "{{ ansible_interfaces | sort }}"
+      already_bootstrapped: "{{ pve_on_proxmox_kernel and pve_package_installed }}"

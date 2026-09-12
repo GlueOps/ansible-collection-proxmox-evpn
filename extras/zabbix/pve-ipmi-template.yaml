@@ -1,0 +1,180 @@
+zabbix_export:
+  version: '7.0'
+  template_groups:
+    - uuid: 116c47a972c3430aa1816d67e5a36e68
+      name: Templates/Hardware
+  templates:
+    - uuid: 0752afe8a6ce4275abf42f47db3067a4
+      template: 'PVE IPMI by Zabbix agent'
+      name: 'PVE IPMI by Zabbix agent'
+      description: |
+        IPMI sensor data exposed by /usr/local/sbin/zbx-ipmi on Proxmox hypervisors.
+        Deployed by the glueops.proxmox_evpn collection, role pve_zabbix.
+
+        Item keys consumed:
+          ipmi.discovery       - LLD JSON of sensors ({#SENSOR}, {#STATUS}, {#ENTITY})
+          ipmi.sensor[<name>]  - numeric reading for a discovered sensor
+          ipmi.chassis[<f>]    - one field from 'ipmitool chassis status'
+          ipmi.sel.count       - SEL entry count
+
+        Pair this with 'Linux by Zabbix agent' on the same host for OS metrics.
+      groups:
+        - name: Templates/Hardware
+      items:
+        - uuid: 0e62064e5d2b4c0db87891a714aa3167
+          name: 'IPMI: SEL entry count'
+          type: ZABBIX_ACTIVE
+          key: ipmi.sel.count
+          delay: 5m
+          history: 90d
+          trends: 365d
+          description: 'Number of entries in the IPMI System Event Log.'
+          tags:
+            - tag: component
+              value: ipmi
+          triggers:
+            - uuid: 1c9cfc9d28f44761beb89820bd13159a
+              expression: 'change(/PVE IPMI by Zabbix agent/ipmi.sel.count)>0'
+              name: 'IPMI: New SEL entries on {HOST.NAME}'
+              priority: INFO
+              description: 'IPMI System Event Log grew. Pull details with `ipmitool sel list`.'
+              manual_close: 'YES'
+        - uuid: 92a2675df8d04c729b42d0a315fd4ea1
+          name: 'IPMI: System power'
+          type: ZABBIX_ACTIVE
+          key: 'ipmi.chassis[System Power]'
+          delay: 1m
+          history: 90d
+          value_type: CHAR
+          tags:
+            - tag: component
+              value: ipmi
+          triggers:
+            - uuid: 3c0a8e6534ec43c08c7458572583b742
+              expression: 'last(/PVE IPMI by Zabbix agent/ipmi.chassis[System Power])<>"on"'
+              name: 'IPMI: System power not on for {HOST.NAME}'
+              priority: HIGH
+              description: 'BMC reports system power state is not "on". Likely the host is shut down or in a fault state.'
+        - uuid: b7a0ca8a4c4c497bbf295e9577b37fd7
+          name: 'IPMI: Power overload'
+          type: ZABBIX_ACTIVE
+          key: 'ipmi.chassis[Power Overload]'
+          delay: 1m
+          history: 90d
+          value_type: CHAR
+          tags:
+            - tag: component
+              value: ipmi
+          triggers:
+            - uuid: 603ae58605734bd1a79fe353166d5579
+              expression: 'last(/PVE IPMI by Zabbix agent/ipmi.chassis[Power Overload])="true"'
+              name: 'IPMI: Power overload on {HOST.NAME}'
+              priority: HIGH
+              description: 'BMC reports a power overload condition.'
+        - uuid: 2bba51f5d71a473a853e0944974cd23e
+          name: 'IPMI: Main power fault'
+          type: ZABBIX_ACTIVE
+          key: 'ipmi.chassis[Main Power Fault]'
+          delay: 1m
+          history: 90d
+          value_type: CHAR
+          tags:
+            - tag: component
+              value: ipmi
+          triggers:
+            - uuid: cb6d8ebca52a4da3aeb8ac377741b843
+              expression: 'last(/PVE IPMI by Zabbix agent/ipmi.chassis[Main Power Fault])="true"'
+              name: 'IPMI: Main power fault on {HOST.NAME}'
+              priority: HIGH
+        - uuid: 17a9f56f1c834774a1b4b526bc00c2b1
+          name: 'IPMI: Drive fault'
+          type: ZABBIX_ACTIVE
+          key: 'ipmi.chassis[Drive Fault]'
+          delay: 1m
+          history: 90d
+          value_type: CHAR
+          tags:
+            - tag: component
+              value: ipmi
+          triggers:
+            - uuid: 3eac0371c3074e3094e7dcc3290698bd
+              expression: 'last(/PVE IPMI by Zabbix agent/ipmi.chassis[Drive Fault])="true"'
+              name: 'IPMI: Drive fault on {HOST.NAME}'
+              priority: AVERAGE
+              description: 'BMC chassis status reports a drive fault. Investigate via `ipmitool sel list` and the storage layer.'
+        - uuid: fdc90b73531643749c61be5cab997d43
+          name: 'IPMI: Cooling/fan fault'
+          type: ZABBIX_ACTIVE
+          key: 'ipmi.chassis[Cooling/Fan Fault]'
+          delay: 1m
+          history: 90d
+          value_type: CHAR
+          tags:
+            - tag: component
+              value: ipmi
+          triggers:
+            - uuid: c9b5c8658f8543cb8f8096450116d319
+              expression: 'last(/PVE IPMI by Zabbix agent/ipmi.chassis[Cooling/Fan Fault])="true"'
+              name: 'IPMI: Cooling/fan fault on {HOST.NAME}'
+              priority: AVERAGE
+        - uuid: 2e128d9b9a9340b49eded0c2d83a9a5c
+          name: 'IPMI: Chassis intrusion'
+          type: ZABBIX_ACTIVE
+          key: 'ipmi.chassis[Chassis Intrusion]'
+          delay: 1m
+          history: 90d
+          value_type: CHAR
+          tags:
+            - tag: component
+              value: ipmi
+          triggers:
+            - uuid: 483af80f208f45f5ba051aebcf97ea38
+              expression: 'last(/PVE IPMI by Zabbix agent/ipmi.chassis[Chassis Intrusion])="active"'
+              name: 'IPMI: Chassis intrusion detected on {HOST.NAME}'
+              priority: AVERAGE
+              manual_close: 'YES'
+      discovery_rules:
+        - uuid: b75ec611c0b64fd298f97504929c6442
+          name: 'IPMI sensors'
+          type: ZABBIX_ACTIVE
+          key: ipmi.discovery
+          delay: 1h
+          lifetime: 1h
+          description: 'Discovers IPMI sensors from `ipmitool sdr elist` via the zbx-ipmi helper.'
+          filter:
+            evaltype: AND
+            conditions:
+              - macro: '{#STATUS}'
+                value: '^(ok|nc|cr|nr)$'
+                formulaid: A
+          item_prototypes:
+            - uuid: b807592a9e6e4e9d879952c7d13c5c87
+              name: 'IPMI sensor: {#SENSOR}'
+              type: ZABBIX_ACTIVE
+              key: 'ipmi.sensor[{#SENSOR}]'
+              delay: 1m
+              history: 90d
+              trends: 365d
+              value_type: FLOAT
+              description: 'Reading for IPMI sensor {#SENSOR} (entity {#ENTITY}).'
+              preprocessing:
+                - type: REGEX
+                  parameters:
+                    - '^([0-9.]+)$'
+                    - \1
+                  error_handler: DISCARD_VALUE
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 10m
+              tags:
+                - tag: component
+                  value: ipmi
+                - tag: sensor
+                  value: '{#SENSOR}'
+          trigger_prototypes:
+            - uuid: 3f08104a6db949aaa50511bb87d3fdf4
+              expression: 'nodata(/PVE IPMI by Zabbix agent/ipmi.sensor[{#SENSOR}],15m)=1'
+              name: 'IPMI sensor {#SENSOR} has stopped reporting'
+              priority: WARNING
+              description: 'No reading from this sensor for 15 minutes. BMC may be offline, or the sensor began returning a non-numeric value.'
+              manual_close: 'YES'

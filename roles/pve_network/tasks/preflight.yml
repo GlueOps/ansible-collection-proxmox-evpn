@@ -1,0 +1,63 @@
+---
+# Narrowing the range silently blackholes any guest whose tag falls outside it.
+# /etc/pve is cluster-wide, so one host sees every guest's config. Checked
+# against the planned range BEFORE the range is applied.
+#
+# LIMITATION: this only reads `tag=` from PVE guest NIC config. A guest that
+# terminates VLANs internally on a trunk vNIC — a firewall or router VM — is
+# invisible here, so the green light is weakest on exactly the hosts that carry
+# the most tenant VLANs. Confirm those by hand.
+- name: Find guest VLAN tags outside the planned bridge-vids ranges
+  ansible.builtin.shell: |
+    set -o pipefail
+    bad=""
+    while read -r br tag; do
+      [ -z "$tag" ] && continue
+      case "$br" in
+        {{ pve_bridge_lan }}) lo={{ pve_lan_vlan_first }}; hi={{ pve_lan_vlan_last }} ;;
+        {{ pve_bridge_nat }}) lo={{ pve_nat_vlan_first }}; hi={{ pve_nat_vlan_last }} ;;
+        *) continue ;;
+      esac
+      if [ "$tag" -lt "$lo" ] || [ "$tag" -gt "$hi" ]; then
+        bad="$bad ${br}:${tag}"
+      fi
+    done < <(grep -hoE 'bridge=({{ pve_bridge_lan }}|{{ pve_bridge_nat }})[^ ]*' \
+               /etc/pve/nodes/*/qemu-server/*.conf 2>/dev/null \
+             | grep -oE '{{ pve_bridge_lan }}|{{ pve_bridge_nat }}|tag=[0-9]+' \
+             | paste - - | sed 's/tag=//' | sort -u)
+    echo "$bad"
+  args:
+    executable: /bin/bash
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  register: pve_out_of_range_tags
+  when:
+    - pve_check_guest_vlan_tags | bool
+    - ('lan' in pve_narrow_bridge_vids) or ('nat' in pve_narrow_bridge_vids)
+
+- name: Refuse to narrow bridge-vids past a tag that is actually in use
+  ansible.builtin.assert:
+    that:
+      - (pve_out_of_range_tags.stdout | default('') | trim) == ''
+    fail_msg: >-
+      Guests are using VLAN tags outside the planned bridge-vids ranges
+      (lan {{ pve_lan_bridge_vids | trim }}, nat {{ pve_nat_bridge_vids | trim }}):
+      {{ pve_out_of_range_tags.stdout | default('') | trim }}.
+      Narrowing would blackhole them. Raise pve_max_tenant_index (and whatever
+      provisions your tenants), or move the guests first.
+  when:
+    - pve_check_guest_vlan_tags | bool
+    - ('lan' in pve_narrow_bridge_vids) or ('nat' in pve_narrow_bridge_vids)
+
+- name: Count running guests (gates the FDB flush and the forced flatten)
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    vms=$(qm list 2>/dev/null | awk 'NR > 1 && $3 == "running"' | wc -l);
+    cts=$(pct list 2>/dev/null | awk 'NR > 1 && $2 == "running"' | wc -l);
+    echo $((vms + cts))
+  args:
+    executable: /bin/bash
+  changed_when: false
+  check_mode: false
+  register: pve_running_guests

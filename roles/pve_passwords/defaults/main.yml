@@ -1,0 +1,21 @@
+---
+# ===========================================================================
+# pve_passwords — set local account passwords fleet-wide
+# ===========================================================================
+#
+# The role takes an already-assembled list; the PROMPTING belongs to the
+# playbook, because vars_prompt only exists at play level. See
+# playbooks/passwords.yml for the entry point that collects them.
+#
+#   pve_password_targets:
+#     - name: root
+#       pw: "..."
+#
+# Nothing is prompted or defaulted here, so including this role with an empty
+# list is a no-op rather than a surprise.
+pve_password_targets: []
+
+# Refuse to create an account that does not already exist. A typo in an account
+# name should fail loudly, not silently provision a new account with a password
+# on every host in the fleet.
+pve_passwords_require_existing: true

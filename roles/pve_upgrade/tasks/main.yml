@@ -1,0 +1,214 @@
+---
+- name: Update the apt cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 0
+
+# Snapshot BEFORE the upgrade so the assertions afterwards have something to
+# compare against. `pve_kernel_pending` answers "did apt offer a kernel?" —
+# precisely the claim that `upgrade: dist` exists to satisfy, and the one that
+# silently stops being true if anyone downgrades it.
+#
+# check_mode: false on the read-only probes throughout — they mutate nothing,
+# and must run under --check or the set_facts that consume them fail on an
+# undefined .stdout.
+- name: Snapshot the kernel state before upgrading
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    echo "pending=$(apt-get -s dist-upgrade 2>/dev/null | grep -c '^Inst proxmox-kernel')";
+    echo "newest=$(ls -1 /boot/vmlinuz-* | sed 's|.*vmlinuz-||' | sort -V | tail -1)";
+    echo "running=$(uname -r)"
+  args:
+    executable: /bin/bash
+  changed_when: false
+  check_mode: false
+  register: pve_kernel_pre
+
+- name: Parse the pre-upgrade snapshot
+  ansible.builtin.set_fact:
+    pve_kernel_pending: "{{ pve_kernel_pre.stdout | regex_search('pending=(\\d+)', '\\1') | first | int }}"
+    pve_kernel_newest_pre: "{{ pve_kernel_pre.stdout | regex_search('newest=(\\S+)', '\\1') | first }}"
+    pve_kernel_running_pre: "{{ pve_kernel_pre.stdout | regex_search('running=(\\S+)', '\\1') | first }}"
+
+# `upgrade: dist` (apt-get dist-upgrade), NOT `upgrade: yes`/`safe`.
+#
+# This is load-bearing for kernel updates and must not be "softened" on the
+# theory that dist-upgrade is the riskier option. A Proxmox kernel bump changes
+# the package NAME: the meta-package moves to a new versioned package, which
+# from apt's point of view is a NEWLY INSTALLED package, not an upgrade of an
+# existing one. Plain `upgrade` refuses to install new packages, so it holds the
+# meta-package back and silently leaves the kernel alone.
+#
+# Measured across ten hosts with no apt holds and no pinning:
+#   apt-get dist-upgrade -> 136 upgraded, 2 kernel packages installed
+#   apt-get upgrade      -> 135 upgraded, 0 kernel packages, "1 not upgraded"
+# That "1 not upgraded" is the kernel, every time. No error, no hold to find
+# later — just a fleet that stops receiving kernel CVE fixes.
+- name: Dist-upgrade all packages
+  ansible.builtin.apt:
+    upgrade: dist
+    autoremove: true
+
+- name: Autoclean the apt cache
+  ansible.builtin.apt:
+    autoclean: true
+
+- name: Determine the running kernel
+  ansible.builtin.command: uname -r
+  changed_when: false
+  check_mode: false
+  register: pve_kernel_running
+
+- name: Determine the newest kernel image on disk
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    ls -1 /boot/vmlinuz-* | sed 's|.*vmlinuz-||' | sort -V | tail -1
+  args:
+    executable: /bin/bash
+  changed_when: false
+  check_mode: false
+  register: pve_kernel_newest
+
+# VERIFICATION 1 — apt offered a kernel, so a kernel must now be on disk.
+#
+# This is the regression test for `upgrade: dist`. If it is ever changed to
+# safe/yes, or a hold or pin appears, apt still lists a kernel as pending but
+# never installs it — a silent failure with no error and no clue in the output.
+# Comparing newest-on-disk across the upgrade catches that on the first run
+# instead of months later at CVE-triage time.
+- name: Assert the kernel apt offered was actually installed
+  ansible.builtin.assert:
+    that:
+      - pve_kernel_newest.stdout | trim != pve_kernel_newest_pre
+    fail_msg: >-
+      apt offered {{ pve_kernel_pending }} kernel package(s) before the upgrade,
+      but the newest kernel on disk is still {{ pve_kernel_newest_pre }}. The
+      dist-upgrade did not install it. Check that `upgrade: dist` has not been
+      changed to safe/yes, and that nothing holds or pins the kernel packages
+      (apt-mark showhold; /etc/apt/preferences.d/).
+    success_msg: >-
+      Kernel installed: {{ pve_kernel_newest_pre }} -> {{ pve_kernel_newest.stdout | trim }}
+  when:
+    - pve_upgrade_verify_kernel | bool
+    - pve_kernel_pending | int > 0
+    - not ansible_check_mode
+
+# Reboot detection is deliberately NOT /var/run/reboot-required alone.
+#
+# Nothing on a stock Proxmox host creates that file: neither update-notifier-
+# common nor needrestart is installed, and no hook in /etc/kernel/postinst.d/ or
+# /etc/apt/apt.conf.d/ writes it. Gating solely on it means the reboot task is
+# skipped forever and installed kernels never enter service — which is exactly
+# how a batch of hosts ended up running a kernel ten weeks older than the one
+# sitting unbooted on their own disks. The authoritative test here is
+# running-vs-newest-on-disk; the stat is consulted as an OR so the role stays
+# correct if a package that does produce the file is ever installed.
+- name: Check whether a reboot is flagged by the OS
+  ansible.builtin.stat:
+    path: /var/run/reboot-required
+  register: pve_reboot_required
+
+- name: Count running guests
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    vms=$(qm list 2>/dev/null | awk 'NR > 1 && $3 == "running"' | wc -l);
+    cts=$(pct list 2>/dev/null | awk 'NR > 1 && $2 == "running"' | wc -l);
+    echo $((vms + cts))
+  args:
+    executable: /bin/bash
+  changed_when: false
+  check_mode: false
+  register: pve_running_guests
+
+- name: Resolve the reboot decision into needed, allowed and taken
+  ansible.builtin.set_fact:
+    pve_kernel_stale: "{{ pve_kernel_running.stdout | trim != pve_kernel_newest.stdout | trim }}"
+    pve_guests_running: "{{ pve_running_guests.stdout | trim | int }}"
+    pve_reboot_needed: >-
+      {{ (pve_kernel_running.stdout | trim != pve_kernel_newest.stdout | trim)
+         or pve_reboot_required.stat.exists }}
+    pve_reboot_allowed: >-
+      {{ (pve_running_guests.stdout | trim | int) == 0
+         or not (pve_upgrade_reboot_requires_empty | bool) }}
+    pve_reboot_taken: >-
+      {{ (pve_upgrade_auto_reboot | bool)
+         and ((pve_kernel_running.stdout | trim != pve_kernel_newest.stdout | trim)
+              or pve_reboot_required.stat.exists)
+         and ((pve_running_guests.stdout | trim | int) == 0
+              or not (pve_upgrade_reboot_requires_empty | bool)) }}
+
+- name: Reboot to activate the newly installed kernel
+  ansible.builtin.reboot:
+    msg: "Rebooting to activate kernel {{ pve_kernel_newest.stdout | trim }}"
+    reboot_timeout: "{{ pve_upgrade_reboot_timeout }}"
+  when: pve_reboot_taken | bool
+
+# VERIFICATION 2 — the host came back ON the kernel we installed.
+#
+# "Rebooted successfully" is not the same claim as "running the new kernel". A
+# host can come back cleanly on the OLD kernel if GRUB defaults elsewhere, if
+# the initramfs for the new kernel failed to build, or if /boot filled up
+# mid-install. Reading uname -r after the reboot is the only thing that proves
+# the upgrade reached the running system.
+- name: Re-read the running kernel after reboot
+  ansible.builtin.command: uname -r
+  changed_when: false
+  check_mode: false
+  register: pve_kernel_running_post
+  when:
+    - pve_reboot_taken | bool
+    - not ansible_check_mode
+
+- name: Assert the new kernel is the one now running
+  ansible.builtin.assert:
+    that:
+      - pve_kernel_running_post.stdout | trim == pve_kernel_newest.stdout | trim
+    fail_msg: >-
+      {{ inventory_hostname }} rebooted but came back on
+      {{ pve_kernel_running_post.stdout | trim }}, not the newest kernel on disk
+      ({{ pve_kernel_newest.stdout | trim }}). The upgrade did NOT reach the
+      running system. Check GRUB's default entry, that
+      /boot/initrd.img-{{ pve_kernel_newest.stdout | trim }} exists and is
+      non-empty, and that /boot had free space during the install.
+    success_msg: >-
+      Kernel in service: {{ pve_kernel_running_pre }} -> {{ pve_kernel_running_post.stdout | trim }}
+  when:
+    - pve_upgrade_verify_kernel | bool
+    - pve_reboot_taken | bool
+    - not ansible_check_mode
+
+- name: Warn that a needed reboot was suppressed by the running-guest guard
+  ansible.builtin.debug:
+    msg: >-
+      REBOOT REQUIRED BUT SKIPPED — {{ inventory_hostname }} is running
+      {{ pve_guests_running }} guest(s). Running kernel
+      {{ pve_kernel_running.stdout | trim }}, newest on disk
+      {{ pve_kernel_newest.stdout | trim }}. Migrate or fail the guests over,
+      then re-run with pve_upgrade_reboot_requires_empty=false, or reboot by
+      hand.
+  when:
+    - pve_upgrade_auto_reboot | bool
+    - pve_reboot_needed | bool
+    - not (pve_reboot_allowed | bool)
+
+# kernel_now deliberately re-reads post-reboot rather than reusing the
+# pre-reboot probe. Reporting the kernel that was running when the decision was
+# made is actively misleading on a run that then rebooted — it prints the OLD
+# version next to `rebooted: true`.
+- name: Result summary
+  ansible.builtin.debug:
+    msg:
+      kernel_before: "{{ pve_kernel_running_pre }}"
+      kernel_installed: "{{ pve_kernel_newest.stdout | trim }}"
+      kernel_now: >-
+        {{ (pve_kernel_running_post.stdout | trim)
+           if (pve_kernel_running_post.stdout is defined)
+           else (pve_kernel_running.stdout | trim) }}
+      kernel_pkgs_offered_by_apt: "{{ pve_kernel_pending }}"
+      reboot_needed: "{{ pve_reboot_needed }}"
+      reboot_taken: "{{ pve_reboot_taken }}"
+      running_guests: "{{ pve_guests_running }}"
+      newest_kernel_in_service: >-
+        {{ ((pve_kernel_running_post.stdout | trim)
+            if (pve_kernel_running_post.stdout is defined)
+            else (pve_kernel_running.stdout | trim)) == (pve_kernel_newest.stdout | trim) }}

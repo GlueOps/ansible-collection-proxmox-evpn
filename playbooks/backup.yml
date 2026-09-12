@@ -1,0 +1,12 @@
+---
+# Install rclone and an hourly config-backup job on each host.
+#
+#   ansible-playbook glueops.proxmox_evpn.backup
+#
+# Needs pve_backup_drive_id and pve_backup_sa_keyfile_src. The play runs one
+# backup at the end to validate the credentials and the remote.
+- name: Configure config backup
+  hosts: "{{ pve_fleet_group | default('pve_nodes') }}"
+  gather_facts: false
+  roles:
+    - role: glueops.proxmox_evpn.pve_backup

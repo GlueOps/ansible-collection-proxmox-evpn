@@ -1,0 +1,38 @@
+---
+# Pairwise DF-ping verification at the configured underlay MTU. Included by
+# playbooks/network.yml as a separate play, AFTER every host has been rewritten
+# — a mesh test is meaningless until both ends are configured.
+#
+# Per-peer behaviour:
+#   peer unreachable even at base MTU -> SKIP. That is a host in the inventory
+#     that is not in the fabric yet, not a fault; a strict check here makes
+#     first-time rollouts impossible.
+#   peer reachable but DF-ping at the target size fails -> FAIL LOUDLY. That is
+#     a real fabric MTU mismatch, usually a switch port left at its default.
+
+- name: Skip unless the underlay target MTU is above 1500
+  ansible.builtin.meta: end_host
+  when: (pve_underlay_target_mtu | int) <= 1500 or not (pve_verify_underlay_mtu | bool)
+
+- name: DF-ping each peer at the configured payload size
+  ansible.builtin.shell: |
+    set -u
+    PEER_IP={{ hostvars[item].pve_link_ip | split('/') | first }}
+    # Base reachability first — a peer that cannot take a 1500-MTU ping is not
+    # yet in the fabric. Treat as skipped, not failed.
+    if ! ping -c 1 -W 2 "$PEER_IP" >/dev/null 2>&1; then
+      echo "SKIP_UNREACHABLE $PEER_IP ({{ item }})"
+      exit 0
+    fi
+    # Reachable, so it must also take the full size. Failure here is real.
+    ping -c 2 -W 2 -M do -s {{ (pve_underlay_target_mtu | int) - 28 }} "$PEER_IP" >/dev/null
+  args:
+    executable: /bin/bash
+  loop: "{{ groups[pve_fleet_group] | difference([inventory_hostname]) }}"
+  register: pve_df_results
+  changed_when: false
+
+- name: Report peers skipped as not yet bootstrapped
+  ansible.builtin.debug:
+    msg: "{{ pve_df_results.results | selectattr('stdout', 'match', '^SKIP_') | map(attribute='stdout') | list }}"
+  when: pve_df_results.results | selectattr('stdout', 'match', '^SKIP_') | list | length > 0

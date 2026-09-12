@@ -1,0 +1,166 @@
+# This file describes the network interfaces available on your system
+# and how to activate them. For more information, see interfaces(5).
+#
+# MANAGED BY ANSIBLE — glueops.proxmox_evpn, role pve_network.
+# Local edits are overwritten on the next run.
+#
+# NOTE: Proxmox's network parser does NOT follow `source` directives, so all
+# bridge/bond/vxlan config must live in this file directly.
+
+auto lo
+iface lo inet loopback
+
+# Public uplink — a port on {{ pve_bridge_public }}.
+auto {{ pve_parent_iface }}
+iface {{ pve_parent_iface }} inet manual
+    mtu {{ pve_public_iface_mtu }}
+
+# Private link / VXLAN underlay.
+# MTU, ring and queue settings derive from the NIC capability probe.
+auto {{ pve_link_iface }}
+iface {{ pve_link_iface }} inet static
+    address {{ pve_link_ip }}
+    mtu {{ pve_underlay_effective_mtu }}
+{% if (pve_nic_max_rx | int) > 0 and (pve_nic_max_tx | int) > 0 %}
+    post-up /sbin/ethtool -G {{ pve_link_iface }} rx {{ pve_nic_max_rx }} tx {{ pve_nic_max_tx }} || true
+{% endif %}
+{% if (pve_nic_max_queues | int) > 0 %}
+    post-up /sbin/ethtool -L {{ pve_link_iface }} combined {{ pve_nic_max_queues }} || true
+{% endif %}
+
+# Public bridge — the host's primary IP and default gateway live here.
+# DNS is deliberately NOT set: on a host running Tailscale, tailscaled owns
+# /etc/resolv.conf via MagicDNS. Manage upstream resolvers there instead.
+auto {{ pve_bridge_public }}
+iface {{ pve_bridge_public }} inet static
+    address {{ pve_public_ip }}/{{ pve_public_prefix }}
+    gateway {{ pve_public_gateway }}
+    bridge-ports {{ pve_parent_iface }}
+    bridge-stp off
+    bridge-fd 0
+{% if 'public' in pve_flat_bridges %}
+    bridge-vlan-aware no
+{% else %}
+    bridge-vlan-aware yes
+    bridge-vids {{ pve_public_bridge_vids | trim }}
+{% endif %}
+
+{% if pve_per_vlan_vni | bool %}
+# VXLAN -> {{ pve_bridge_lan }}. Per-VLAN VNI (single VXLAN device): each tenant
+# VLAN gets its own VNI, so FRR installs remote MACs in the right VLAN.
+#
+# No vxlan-id — bridge-vlan-vni-map is what makes this an SVD, and the kernel
+# forbids sharing UDP 4789 with a traditional device, so all three VXLAN
+# devices on this host must be SVD together.
+#
+# vxlan-vnifilter is REQUIRED, not optional (ifupdown2 defaults it off).
+# Without it each SVD is a plain COLLECT_METADATA device that claims the UDP
+# port exclusively, so only the first is created and the rest fail with
+# "cannot enslave link ...: No such device". With VNI filtering on, each device
+# filters its own VNIs and they coexist.
+#
+# vlan {{ pve_lan_vlan_first }}-{{ pve_lan_vlan_last }} -> vni {{ pve_lan_vni_first }}-{{ pve_lan_vni_last }}
+auto {{ pve_vxlan_lan_dev }}
+iface {{ pve_vxlan_lan_dev }}
+    vxlan-local-tunnelip {{ pve_local_link_ip }}
+    vxlan-vnifilter yes
+    bridge-vlan-vni-map {{ pve_lan_vlan_first }}-{{ pve_lan_vlan_last }}={{ pve_lan_vni_first }}-{{ pve_lan_vni_last }}
+    vxlan-learning {{ 'on' if (pve_vxlan_learning | bool) else 'off' }}
+    bridge-learning {{ 'on' if (pve_bridge_learning | bool) else 'off' }}
+    bridge-arp-nd-suppress on
+    mtu {{ pve_vxlan_mtu }}
+{% else %}
+# VXLAN VNI {{ pve_vxlan_lan_id }} -> {{ pve_bridge_lan }} (FRR EVPN drives peers).
+auto {{ pve_vxlan_lan_dev }}
+iface {{ pve_vxlan_lan_dev }}
+    vxlan-id {{ pve_vxlan_lan_id }}
+    vxlan-local-tunnelip {{ pve_local_link_ip }}
+    vxlan-learning {{ 'on' if (pve_vxlan_learning | bool) else 'off' }}
+    bridge-learning {{ 'on' if (pve_bridge_learning | bool) else 'off' }}
+    bridge-arp-nd-suppress on
+    mtu {{ pve_vxlan_mtu }}
+{% endif %}
+
+auto {{ pve_bridge_lan }}
+iface {{ pve_bridge_lan }} inet manual
+    bridge-ports {{ pve_vxlan_lan_dev }}
+    bridge-stp off
+    bridge-fd 0
+    bridge-vlan-aware yes
+    bridge-vids {{ pve_lan_bridge_vids | trim }}
+    mtu {{ pve_bridge_mtu }}
+
+{% if pve_per_vlan_vni | bool %}
+# VXLAN -> {{ pve_bridge_nat }}. Distinct VNI base from LAN: with the default
+# bases, VLAN 201-220 is valid on BOTH bridges at once, so a shared base would
+# collide them onto one VNI.
+#
+# vlan {{ pve_nat_vlan_first }}-{{ pve_nat_vlan_last }} -> vni {{ pve_nat_vni_first }}-{{ pve_nat_vni_last }}
+auto {{ pve_vxlan_nat_dev }}
+iface {{ pve_vxlan_nat_dev }}
+    vxlan-local-tunnelip {{ pve_local_link_ip }}
+    vxlan-vnifilter yes
+    bridge-vlan-vni-map {{ pve_nat_vlan_first }}-{{ pve_nat_vlan_last }}={{ pve_nat_vni_first }}-{{ pve_nat_vni_last }}
+    vxlan-learning {{ 'on' if (pve_vxlan_learning | bool) else 'off' }}
+    bridge-learning {{ 'on' if (pve_bridge_learning | bool) else 'off' }}
+    bridge-arp-nd-suppress on
+    mtu {{ pve_vxlan_mtu }}
+{% else %}
+# VXLAN VNI {{ pve_vxlan_nat_id }} -> {{ pve_bridge_nat }} (FRR EVPN drives peers).
+auto {{ pve_vxlan_nat_dev }}
+iface {{ pve_vxlan_nat_dev }}
+    vxlan-id {{ pve_vxlan_nat_id }}
+    vxlan-local-tunnelip {{ pve_local_link_ip }}
+    vxlan-learning {{ 'on' if (pve_vxlan_learning | bool) else 'off' }}
+    bridge-learning {{ 'on' if (pve_bridge_learning | bool) else 'off' }}
+    bridge-arp-nd-suppress on
+    mtu {{ pve_vxlan_mtu }}
+{% endif %}
+
+auto {{ pve_bridge_nat }}
+iface {{ pve_bridge_nat }} inet manual
+    bridge-ports {{ pve_vxlan_nat_dev }}
+    bridge-stp off
+    bridge-fd 0
+    bridge-vlan-aware yes
+    bridge-vids {{ pve_nat_bridge_vids | trim }}
+    mtu {{ pve_bridge_mtu }}
+
+{% if pve_per_vlan_vni | bool %}
+# VXLAN -> {{ pve_bridge_sync }} (HA state sync, e.g. pfsync/CARP). Sync traffic
+# is untagged, so it lands on VLAN 1; map that single VLAN to the sync VNI.
+# Converted only because the kernel refuses to mix SVD and traditional devices
+# on UDP 4789 — the VNI itself is unchanged.
+auto {{ pve_vxlan_sync_dev }}
+iface {{ pve_vxlan_sync_dev }}
+    vxlan-local-tunnelip {{ pve_local_link_ip }}
+    vxlan-vnifilter yes
+    bridge-vlan-vni-map 1={{ pve_vxlan_sync_id }}
+    vxlan-learning {{ 'on' if (pve_vxlan_learning | bool) else 'off' }}
+    bridge-learning {{ 'on' if (pve_bridge_learning | bool) else 'off' }}
+    bridge-arp-nd-suppress on
+    mtu {{ pve_vxlan_mtu }}
+{% else %}
+# VXLAN VNI {{ pve_vxlan_sync_id }} -> {{ pve_bridge_sync }} (HA state sync).
+auto {{ pve_vxlan_sync_dev }}
+iface {{ pve_vxlan_sync_dev }}
+    vxlan-id {{ pve_vxlan_sync_id }}
+    vxlan-local-tunnelip {{ pve_local_link_ip }}
+    vxlan-learning {{ 'on' if (pve_vxlan_learning | bool) else 'off' }}
+    bridge-learning {{ 'on' if (pve_bridge_learning | bool) else 'off' }}
+    bridge-arp-nd-suppress on
+    mtu {{ pve_vxlan_mtu }}
+{% endif %}
+
+auto {{ pve_bridge_sync }}
+iface {{ pve_bridge_sync }} inet manual
+    bridge-ports {{ pve_vxlan_sync_dev }}
+    bridge-stp off
+    bridge-fd 0
+{% if 'sync' in pve_flat_bridges %}
+    bridge-vlan-aware no
+{% else %}
+    bridge-vlan-aware yes
+    bridge-vids {{ pve_sync_bridge_vids | trim }}
+{% endif %}
+    mtu {{ pve_bridge_mtu }}

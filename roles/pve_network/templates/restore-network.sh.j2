@@ -1,0 +1,26 @@
+#!/bin/bash
+# MANAGED BY ANSIBLE — glueops.proxmox_evpn, role pve_network.
+#
+# Restore networking from the OLDEST BACKUP-* file, which is the pristine
+# pre-bridge state. Run this from the IPMI/iDRAC console when SSH is dead.
+#
+# The backups are content-hashed and written with force:false, so the oldest one
+# is the configuration this host had before Ansible ever touched it.
+set -ex
+
+OLDEST=$(ls -tr {{ pve_interfaces_path }}.BACKUP-* 2>/dev/null | head -1)
+if [ -z "$OLDEST" ]; then
+  echo "No backup found"
+  exit 1
+fi
+
+echo "Restoring from: $OLDEST"
+cp -v "$OLDEST" {{ pve_interfaces_path }}
+
+{% for snippet in pve_obsolete_iface_snippets %}
+rm -fv {{ pve_interfaces_d }}/{{ snippet }}* || true
+{% endfor %}
+
+systemctl stop frr 2>/dev/null || true
+ifreload -a
+ip -br addr show

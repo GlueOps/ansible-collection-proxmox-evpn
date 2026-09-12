@@ -1,0 +1,22 @@
+---
+galaxy_info:
+  role_name: pve_evpn
+  author: GlueOps
+  description: >-
+    Install and configure FRR as a BGP-EVPN control plane for VXLAN-backed
+    Proxmox bridges, with route-reflector or full-mesh topology driven by
+    inventory group membership.
+  license: Apache-2.0
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - trixie
+        - bookworm
+  galaxy_tags:
+    - proxmox
+    - frr
+    - bgp
+    - evpn
+    - vxlan
+dependencies: []

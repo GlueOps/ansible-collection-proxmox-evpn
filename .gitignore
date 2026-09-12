@@ -1,0 +1,38 @@
+# Ansible
+*.retry
+.ansible/
+collections/
+*.tar.gz
+
+# Vault / secrets — never commit
+.vault_pass*
+*vault-password*
+vault_pass*
+*.p12
+*.pem
+*sa-key*.json
+*service-account*.json
+*-sa.json
+
+# Inventories belong in your own private repo, not here. Anchored to the repo
+# root so the shipped skeleton under examples/ is still tracked.
+/inventories/
+/inventory/
+/ansible.cfg
+
+# Hardware/credential sheets
+*server-layout*.csv
+*ipmi*.csv
+*-credentials.csv
+
+# Python
+*.py[cod]
+__pycache__/
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+.claude/

@@ -1,0 +1,14 @@
+---
+# Install Proxmox VE onto stock Debian hosts.
+#
+#   ansible-playbook glueops.proxmox_evpn.install
+#
+# serial: 1 — the role reboots into the Proxmox kernel, so one host at a time
+# keeps the fleet available through a first bring-up.
+- name: Install Proxmox VE
+  hosts: "{{ pve_fleet_group | default('pve_nodes') }}"
+  become: true
+  gather_facts: true
+  serial: 1
+  roles:
+    - role: glueops.proxmox_evpn.proxmox_install

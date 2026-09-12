@@ -1,0 +1,174 @@
+---
+# ===========================================================================
+# pve_network — canonical owner of /etc/network/interfaces
+# ===========================================================================
+#
+# REQUIRED per-host variables (supply from your inventory, not from here):
+#   pve_parent_iface      public uplink NIC           e.g. eno1
+#   pve_link_iface        VXLAN underlay NIC          e.g. eno2
+#   pve_link_ip           underlay address with mask  e.g. 10.0.0.2/24
+#   pve_public_ip         public address              e.g. 198.51.100.2
+#   pve_public_prefix     public prefix length        e.g. 24
+#   pve_public_gateway    public default gateway      e.g. 198.51.100.1
+
+# --- Blast radius ----------------------------------------------------------
+# How many hosts reconfigure at once. DEFAULT 1, and 1 is the right answer
+# whenever this role touches the public bridge, because that bridge carries the
+# host IP, the default route and your SSH session: recovery from a bad apply is
+# out-of-band (IPMI/iDRAC), not SSH.
+#
+# Raise it ONLY when the run leaves the public bridge untouched — i.e. the host
+# is already at its target bridge-vids/flat state and the change is confined to
+# the VXLAN devices (a per-VLAN VNI conversion is the case this exists for).
+pve_bridge_batch: 1
+
+# --- Device naming ---------------------------------------------------------
+# The four-bridge topology is this collection's opinion; the names are yours.
+pve_bridge_public: vmbr_public
+pve_bridge_lan: vmbr_lan
+pve_bridge_nat: vmbr_nat
+pve_bridge_sync: vmbr_sync
+pve_vxlan_lan_dev: vxlan_lan
+pve_vxlan_nat_dev: vxlan_nat
+pve_vxlan_sync_dev: vxlan_sync
+
+pve_interfaces_path: /etc/network/interfaces
+pve_interfaces_d: /etc/network/interfaces.d
+pve_rollback_script: /root/restore-network.sh
+
+# Legacy interfaces.d snippets removed on each run — Proxmox's network parser
+# does not follow `source` directives, so anything left here is invisible to
+# PVE but still applied by ifupdown, which is the worst of both.
+pve_obsolete_iface_snippets:
+  - "{{ pve_bridge_public }}.cfg"
+  - "{{ pve_bridge_lan }}.cfg"
+  - "{{ pve_bridge_lan }}.cfg.PRE-EVPN"
+  - "{{ pve_bridge_nat }}.cfg"
+  - "{{ pve_bridge_nat }}.cfg.PRE-EVPN"
+
+# --- MTU -------------------------------------------------------------------
+# Underlay MTU target. The role probes the NIC's maxmtu and uses
+# min(pve_underlay_target_mtu, nic_maxmtu) as the effective underlay MTU;
+# VXLAN and bridge MTUs derive at effective-50 (the VXLAN header cost).
+#
+# Raise above 1500 ONLY after DF-pinging the switch path at the new size.
+# Nothing on the host can detect a switch port that will not carry it.
+pve_underlay_target_mtu: 1500
+pve_public_iface_mtu: 1500
+
+# --- VXLAN VNIs (legacy one-VNI-per-bridge model) --------------------------
+# Must match across the fleet: FRR advertises locally-defined VNIs and remote
+# VTEPs pair by number.
+pve_vxlan_lan_id: 10001
+pve_vxlan_nat_id: 10002
+pve_vxlan_sync_id: 10003
+
+# --- Per-VLAN VNI (single-VXLAN-device) model ------------------------------
+# The legacy model above puts every tenant VLAN inside ONE VNI per bridge. FRR
+# binds an L2VNI to exactly one VLAN, so with no VID<->VNI map it resolves the
+# VNI to the VXLAN port's PVID (VLAN 1) and installs every remote MAC there —
+# the wrong VLAN for every tenant. Setting this true gives each tenant VLAN its
+# own VNI so MACs land where they belong. See docs/per-vlan-vni.md.
+#
+# DEFAULT FALSE. A host only forms a working L2 domain with hosts sharing its
+# VNIs, so flipping this per-host ISOLATES that host from the rest of the
+# fleet. Flip it fleet-wide or not at all, except for deliberate test cells.
+#
+# Conversion is all-or-nothing per host: the kernel refuses to run external
+# (metadata-mode) and traditional VXLAN devices on the same UDP port, so all
+# three devices switch together.
+#
+# Set it in inventory rather than passing -e: with -e, a later run without the
+# flag silently reverts a converted host to the legacy model.
+pve_per_vlan_vni: false
+
+# --- Tenant VLAN numbering -------------------------------------------------
+# LAN vlan = pve_lan_vlan_base + index, NAT vlan = pve_nat_vlan_base + index,
+# for index in [1, pve_max_tenant_index]. If you provision tenants from another
+# system, these MUST mirror it: a tenant above the provisioned range gets a
+# VLAN with no VNI and fails SILENTLY. The role asserts the ranges are sane but
+# cannot see the other side — treat any change as a coupled change.
+pve_lan_vlan_base: 100
+pve_nat_vlan_base: 200
+pve_max_tenant_index: 120
+
+# VNI = vni_base + vlan-id. The two bases MUST differ: with the values above
+# LAN spans VLAN 101-220 and NAT spans 201-320, so VLAN 201-220 is a valid ID
+# on BOTH bridges at once. A shared base would collide them onto one VNI.
+pve_lan_vni_base: 10000     # VLAN 101-220 -> VNI 10101-10220
+pve_nat_vni_base: 20000     # VLAN 201-320 -> VNI 20201-20320
+
+# --- Bridge VID narrowing --------------------------------------------------
+# Which vlan-aware bridges get a narrowed `bridge-vids` instead of 2-4094.
+# A list drawn from [lan, nat, sync, public]; [] disables the feature.
+#
+# Why: a vlan-aware bridge replicates BOTH EVPN-learned and local/permanent FDB
+# entries per configured VID, so the cost is (MACs x VIDs), not (MACs). On a
+# 37-host fleet this measured ~378k entries per host at 2-4094 and ~12.6k with
+# all four narrowed — a ~30x reduction. See docs/bridge-vid-narrowing.md.
+#
+# lan/nat narrow to the derived tenant span. sync/public carry no tenant tags
+# and have no scheme to derive from, so they take pve_untagged_bridge_vids;
+# their real traffic is untagged on PVID 1, outside bridge-vids either way.
+#
+# STAGE THE ROLLOUT. lan/nat carry no management traffic, but PUBLIC HOLDS THE
+# HOST IP, DEFAULT GATEWAY AND SSH PATH.
+pve_narrow_bridge_vids: []
+pve_untagged_bridge_vids: "2-10"
+
+# Bridges carrying NO VLAN tags at all — rendered `bridge-vlan-aware no`.
+# Takes precedence over pve_narrow_bridge_vids for the bridges listed.
+# Only [sync, public] are accepted; lan/nat carry per-tenant tags by definition.
+#
+# WARNING: a flat sync bridge is INCOMPATIBLE with pve_per_vlan_vni and
+# silently kills pfsync at layer 2 — under the SVD model the sync VXLAN takes
+# its egress VNI from `bridge-vlan-vni-map 1=<vni>`, i.e. it is keyed on the
+# frame being classified into VLAN 1, and a non-vlan-aware bridge never
+# assigns a VLAN. The role refuses that combination.
+pve_flat_bridges: []
+
+# --- Dataplane MAC learning on the VXLAN devices ---------------------------
+# Both flags together, or neither.
+#
+#   pve_vxlan_learning   -> the vxlan device's own FDB, MAC -> remote VTEP IP
+#   pve_bridge_learning  -> the bridge FDB, MAC -> port + vlan
+#
+# A frame is only unicast across the fabric when both exist. bridge-learning
+# alone resolves the MAC to the vxlan device, which — still nolearning — head-end
+# replicates to every VTEP anyway: the same flooding, now with an FDB entry that
+# makes a health check look green.
+#
+# EVPN normally wants nolearning, because dataplane learning races the control
+# plane. That assumes the control plane is winning. Where it is not, turning
+# both on converts permanent flooding into ordinary learn-on-first-packet.
+# It is a MITIGATION, not a fix — only pve_per_vlan_vni makes FRR install MACs
+# into the right tenant VLAN.
+pve_vxlan_learning: false
+pve_bridge_learning: false
+
+# --- Guest safety ----------------------------------------------------------
+# The FDB flush and the forced bridge-flatten are momentarily disruptive:
+# entries vanish and FRR reinstalls them over the next few seconds, so a guest
+# on this host floods or blackholes until it does. Refused by default while any
+# guest is running. The host is still left correct on disk and in VLAN
+# membership; only the stale-entry eviction waits for a change window.
+pve_fdb_flush_requires_empty: true
+
+# Check guest VLAN tags against the planned bridge-vids before narrowing, and
+# refuse if narrowing would blackhole a tag in use. Reads /etc/pve, which is
+# cluster-wide, so one host sees every guest's config.
+#
+# NOTE: this can only see `tag=` on PVE guest NICs. A guest that terminates
+# VLANs internally on a trunk vNIC (a firewall VM, for example) is invisible to
+# it — the check is weakest on exactly the hosts that matter most.
+pve_check_guest_vlan_tags: true
+
+# --- Verification ----------------------------------------------------------
+# Pairwise DF-ping at the configured underlay MTU after the rewrite. Skipped
+# entirely when the effective MTU is 1500 (nothing to prove).
+pve_verify_underlay_mtu: true
+
+# --- Inventory group names -------------------------------------------------
+# The group holding every hypervisor in this fleet. Peers for the DF-ping mesh
+# are drawn from it.
+pve_fleet_group: pve_nodes

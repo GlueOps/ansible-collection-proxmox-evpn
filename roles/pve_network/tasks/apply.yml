@@ -1,0 +1,90 @@
+---
+# ----- Apply ring and queue tuning now (post-up in the config persists it) ---
+- name: Apply max ring buffers now
+  # failed_when: false — some NICs reject a set at their own reported maximum.
+  ansible.builtin.command:
+    argv:
+      - /sbin/ethtool
+      - -G
+      - "{{ pve_link_iface }}"
+      - rx
+      - "{{ pve_nic_max_rx }}"
+      - tx
+      - "{{ pve_nic_max_tx }}"
+  when: (pve_nic_max_rx | int) > 0 and (pve_nic_max_tx | int) > 0
+  register: pve_ethtool_ring
+  failed_when: false
+  changed_when: pve_ethtool_ring.rc == 0
+
+- name: Apply max combined queues now
+  ansible.builtin.command:
+    argv:
+      - /sbin/ethtool
+      - -L
+      - "{{ pve_link_iface }}"
+      - combined
+      - "{{ pve_nic_max_queues }}"
+  when: (pve_nic_max_queues | int) > 0
+  register: pve_ethtool_queues
+  failed_when: false
+  changed_when: pve_ethtool_queues.rc == 0
+
+# ----- Backup and rollback --------------------------------------------------
+- name: Stat current interfaces file (for the content-hashed backup name)
+  ansible.builtin.stat:
+    path: "{{ pve_interfaces_path }}"
+    checksum_algorithm: sha256
+  register: pve_cur_iface
+
+- name: Compute backup path
+  ansible.builtin.set_fact:
+    pve_backup_path: "{{ pve_interfaces_path }}.BACKUP-{{ pve_cur_iface.stat.checksum[:16] }}"
+
+- name: Snapshot current interfaces file
+  # force: false — if a backup with this content already exists, leave it
+  # untouched. The first run records the pristine pre-bridge state; later runs
+  # only add a backup when the live config differs from everything already
+  # snapshotted. mtime stays at original creation, so the rollback script's
+  # "oldest backup is the pristine one" assumption holds.
+  ansible.builtin.copy:
+    src: "{{ pve_interfaces_path }}"
+    dest: "{{ pve_backup_path }}"
+    remote_src: true
+    force: false
+    mode: "0644"
+
+- name: Drop an out-of-band-runnable rollback script
+  ansible.builtin.template:
+    src: restore-network.sh.j2
+    dest: "{{ pve_rollback_script }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Remove obsolete interfaces.d snippets
+  # Proxmox's network parser does not follow `source` directives, so a snippet
+  # left here is invisible to PVE but still applied by ifupdown.
+  ansible.builtin.file:
+    path: "{{ pve_interfaces_d }}/{{ item }}"
+    state: absent
+  loop: "{{ pve_obsolete_iface_snippets }}"
+
+- name: Remove stale interfaces.new
+  # PVE writes interfaces.new for pending changes made in its UI. When we manage
+  # the file directly this goes stale, and the PVE API then shows it instead of
+  # the live config — which makes the bridges invisible in the web UI.
+  ansible.builtin.file:
+    path: "{{ pve_interfaces_path }}.new"
+    state: absent
+
+- name: Write the interfaces file with all bridges inline
+  ansible.builtin.template:
+    src: interfaces.j2
+    dest: "{{ pve_interfaces_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: reload network
+
+- name: Apply pending network changes now
+  ansible.builtin.meta: flush_handlers

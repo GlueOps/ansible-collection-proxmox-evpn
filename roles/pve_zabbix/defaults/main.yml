@@ -1,0 +1,44 @@
+---
+# ===========================================================================
+# pve_zabbix — Zabbix Agent 2 plus IPMI sensor exposure
+# ===========================================================================
+#
+# Installs the agent and ipmitool, and exposes BMC sensor data through
+# UserParameters backed by a cache, so per-sensor polls never touch the BMC in
+# the request path.
+#
+# What this role does NOT do, deliberately — all of it is server-side: create
+# the host in Zabbix, link a template, or define the auto-registration action.
+# With pve_zabbix_host_metadata set on the agent, a server-side autoregistration
+# action keyed on that string can attach the right template the first time the
+# agent makes an active connection. A matching IPMI template ships in
+# extras/zabbix/ of this collection.
+
+# REQUIRED. The Zabbix server the agent reports to, for both passive and active
+# checks. Shared name with the pve_firewall role, which scopes the agent port to
+# whatever this resolves to — set it once for both.
+pve_monitoring_server: ""
+
+pve_zabbix_host_metadata: pve-hypervisor
+pve_zabbix_hostname: "{{ inventory_hostname }}"
+
+# Zabbix 7.0 LTS for Debian 13. Change both together for another release.
+pve_zabbix_release_deb: "zabbix-release_latest_7.0+debian13_all.deb"
+pve_zabbix_release_url: >-
+  https://repo.zabbix.com/zabbix/7.0/debian/pool/main/z/zabbix-release/{{ pve_zabbix_release_deb }}
+
+pve_zabbix_conf: /etc/zabbix/zabbix_agent2.conf
+pve_zabbix_userparam: /etc/zabbix/zabbix_agent2.d/ipmi.conf
+pve_zabbix_helper: /usr/local/sbin/zbx-ipmi
+pve_zabbix_sudoers: /etc/sudoers.d/zabbix-ipmi
+pve_zabbix_modules_file: /etc/modules-load.d/ipmi.conf
+pve_zabbix_cache_dir: /var/lib/zbx-ipmi
+
+pve_ipmi_kernel_modules:
+  - ipmi_msghandler
+  - ipmi_devintf
+  - ipmi_si
+
+# Expose IPMI sensors at all. Set false on hardware with no BMC (a VM, or a
+# board whose IPMI you do not use) to install the agent alone.
+pve_zabbix_manage_ipmi: true

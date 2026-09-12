@@ -1,0 +1,32 @@
+---
+- name: Probe the agent self-test
+  ansible.builtin.command: zabbix_agent2 -t agent.hostname
+  register: pve_zbx_self_test
+  changed_when: false
+  failed_when: false
+
+- name: Probe the IPMI helper as the zabbix user
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      out=$(sudo -u zabbix {{ pve_zabbix_helper }} discover 2>/dev/null || echo '{"data":[]}')
+      count=$(echo "$out" | jq '.data | length' 2>/dev/null || echo "?")
+      first=$(echo "$out" | jq -r '.data[0]["{% raw %}{#SENSOR}{% endraw %}"] // empty' 2>/dev/null)
+      if [ -n "$first" ]; then
+        val=$(sudo -u zabbix {{ pve_zabbix_helper }} sensor "$first" 2>/dev/null)
+        echo "sensors=${count} first='${first}' value='${val}'"
+      else
+        echo "sensors=${count} (no IPMI sensors readable — check BMC and kernel modules)"
+      fi
+    executable: /bin/bash
+  register: pve_ipmi_probe
+  changed_when: false
+  failed_when: false
+  when: pve_zabbix_manage_ipmi | bool
+
+- name: Result summary
+  ansible.builtin.debug:
+    msg:
+      hostname: "{{ pve_zabbix_hostname }}"
+      agent_self_test: "{{ pve_zbx_self_test.stdout_lines | default([]) }}"
+      ipmi: "{{ pve_ipmi_probe.stdout | default('(ipmi not managed)') }}"

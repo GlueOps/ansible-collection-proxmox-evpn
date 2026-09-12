@@ -1,0 +1,19 @@
+---
+galaxy_info:
+  role_name: pve_upgrade
+  author: GlueOps
+  description: >-
+    apt dist-upgrade a Proxmox host, verify the offered kernel was installed and
+    is the one running after reboot, and refuse to reboot under a live guest.
+  license: Apache-2.0
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - trixie
+        - bookworm
+  galaxy_tags:
+    - proxmox
+    - patching
+    - apt
+dependencies: []

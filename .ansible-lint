@@ -1,0 +1,12 @@
+---
+profile: production
+
+exclude_paths:
+  - .github/
+  - examples/
+  - extras/
+
+skip_list:
+  # Long-running shell probes are deliberately not modules; each carries a
+  # comment explaining what the module cannot express.
+  - command-instead-of-shell

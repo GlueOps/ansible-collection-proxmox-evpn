@@ -1,0 +1,21 @@
+---
+galaxy_info:
+  role_name: pve_network
+  author: GlueOps
+  description: >-
+    Canonical owner of /etc/network/interfaces on a Proxmox VE host — public
+    bridge, VXLAN-backed tenant bridges, underlay NIC tuning, bridge VID
+    narrowing and kernel reconciliation.
+  license: Apache-2.0
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - trixie
+        - bookworm
+  galaxy_tags:
+    - proxmox
+    - vxlan
+    - evpn
+    - networking
+dependencies: []

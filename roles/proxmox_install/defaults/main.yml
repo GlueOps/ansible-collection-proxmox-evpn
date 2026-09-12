@@ -1,0 +1,44 @@
+---
+# Hostname management -------------------------------------------------------
+pve_set_hostname: true
+pve_hostname: "{{ inventory_hostname }}"
+pve_manage_hosts_file: true
+
+# Proxmox apt repository ----------------------------------------------------
+# Defaults target Debian 13 (trixie) with the no-subscription repo. Point these
+# at the enterprise repo if you hold a subscription.
+pve_repo_line: "deb http://download.proxmox.com/debian/pve trixie pve-no-subscription"
+pve_key_url: "https://enterprise.proxmox.com/debian/proxmox-release-trixie.gpg"
+pve_key_path: /etc/apt/trusted.gpg.d/proxmox-release-trixie.gpg
+pve_repo_path: /etc/apt/sources.list.d/pve-install-repo.list
+
+# Enterprise repo files dropped by proxmox-ve's post-install. Removed because
+# without a subscription every apt-update emits 401s. Set to [] to keep them.
+pve_drop_enterprise_repos:
+  - /etc/apt/sources.list.d/pve-enterprise.sources
+  - /etc/apt/sources.list.d/pve-enterprise.list
+  - /etc/apt/sources.list.d/ceph.sources
+  - /etc/apt/sources.list.d/ceph.list
+
+# Packages ------------------------------------------------------------------
+pve_kernel_package: proxmox-default-kernel
+pve_install_packages:
+  - proxmox-ve
+  - open-iscsi
+  - chrony
+  - dnsmasq
+pve_install_postfix: true
+pve_postfix_package: postfix
+
+# iptables-persistent is installed here rather than by pve_firewall, so that
+# role can assume it exists and stay idempotent.
+pve_install_iptables_persistent: true
+
+pve_remove_packages:
+  - linux-image-amd64
+  - os-prober
+pve_purge_debian_kernel_glob: true
+
+# Reboot behaviour ----------------------------------------------------------
+pve_reboot_timeout: 1200
+pve_reboot_post_delay: 30

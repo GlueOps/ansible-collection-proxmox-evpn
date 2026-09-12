@@ -1,0 +1,65 @@
+---
+# ===========================================================================
+# pve_backup — hourly config push to a Google Shared Drive via rclone
+# ===========================================================================
+#
+# Latest-snapshot semantics: `rclone copy` adds and updates but never deletes,
+# so each file overwrites its previous copy and there is no version history.
+# That is deliberate — this is a rebuild aid, not an archive. The FRR and
+# network config it captures is also reproducible from this collection plus your
+# inventory; what it gives you is an off-box record of what a dead host actually
+# had, including anything not under Ansible's control.
+
+# --- rclone remote ---------------------------------------------------------
+pve_backup_remote_name: gdrive
+
+# REQUIRED. The Shared Drive ID (starts with 0A...). Not a secret — it is a
+# location, not a credential.
+pve_backup_drive_id: ""
+
+# Optional folder within the Shared Drive to treat as the root. Not a secret.
+pve_backup_folder_id: ""
+
+# Optional sub-path beneath the root. Empty means per-host folders sit at the
+# root of whatever pve_backup_folder_id points at.
+pve_backup_path: ""
+
+# Hourly, on the minute given here.
+pve_backup_cron_minute: "0"
+
+# --- Service-account credential --------------------------------------------
+# REQUIRED. Path on the CONTROL NODE to the service-account JSON key. This IS a
+# secret: keep it outside the repository and make sure your .gitignore covers
+# it. A Content Manager role on the Shared Drive is enough — it can write and
+# overwrite but cannot permanently delete, which suits a copy-only job.
+pve_backup_sa_keyfile_src: ""
+pve_backup_sa_keyfile_dest: /etc/rclone/backup-sa.json
+
+pve_backup_script_path: /usr/local/sbin/pve-config-backup.sh
+pve_backup_log_path: /var/log/pve-config-backup.log
+
+# --- What to back up -------------------------------------------------------
+# Entries may be files or directories; directories are copied recursively.
+# Missing paths are skipped, so one list is safe across hosts with different
+# roles (a DHCP server and a plain hypervisor, say).
+pve_backup_files:
+  # Host networking — the file the pve_network role rewrites: bridges, VXLAN
+  # devices, the underlay address, and the public IP and gateway the host is
+  # reached on. That role keeps content-hashed copies and a rollback script on
+  # the host itself, but both are LOCAL: they recover a bad edit, not a dead
+  # host. Without this entry a rebuild has no off-box record of the networking.
+  - /etc/network/interfaces
+  - /etc/network/interfaces.d
+  # BGP-EVPN control plane.
+  - /etc/frr/frr.conf
+  - /etc/frr/daemons
+  # DHCP, on the hosts that serve it. Leases matter: they are the only record of
+  # which guest holds which address.
+  - /etc/dnsmasq.d
+  - /var/lib/misc/dnsmasq.leases
+
+# Globs deleted locally AFTER a confirmed upload (drain semantics): the files
+# live on the Shared Drive rather than accumulating on the host. A file written
+# after staging has no staged copy and is left for the next run rather than
+# deleted unsent. Leave empty to disable.
+pve_backup_purge_after_upload: []

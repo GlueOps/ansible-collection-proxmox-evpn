@@ -1,0 +1,14 @@
+---
+# Install Zabbix Agent 2 and expose BMC/IPMI sensors.
+#
+#   ansible-playbook glueops.proxmox_evpn.zabbix
+#
+# Server-side work this does NOT do: creating the host in Zabbix, linking a
+# template, or defining the auto-registration action. A matching IPMI template
+# ships in extras/zabbix/ of this collection — import it, then link it to an
+# autoregistration action keyed on pve_zabbix_host_metadata.
+- name: Install the monitoring agent
+  hosts: "{{ pve_fleet_group | default('pve_nodes') }}"
+  gather_facts: false
+  roles:
+    - role: glueops.proxmox_evpn.pve_zabbix

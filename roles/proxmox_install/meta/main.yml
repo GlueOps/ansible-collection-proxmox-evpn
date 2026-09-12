@@ -1,0 +1,17 @@
+---
+galaxy_info:
+  role_name: proxmox_install
+  author: GlueOps
+  description: Install Proxmox VE onto a stock Debian host, idempotently.
+  license: Apache-2.0
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - trixie
+        - bookworm
+  galaxy_tags:
+    - proxmox
+    - pve
+    - debian
+dependencies: []

@@ -1,0 +1,129 @@
+---
+- name: Refuse to proceed unless pve_ssh_whitelist_extra is explicitly defined
+  ansible.builtin.assert:
+    that: pve_ssh_whitelist_extra is defined
+    fail_msg: |
+      pve_ssh_whitelist_extra must be defined in your inventory (it may be []).
+      This is a lockout guard — the operator has to state which non-fleet
+      sources should keep access to the SSH port before it is locked down.
+      Set [] if your out-of-band mesh is the only direct path.
+
+- name: Derive the effective SSH whitelist from the inventory
+  ansible.builtin.set_fact:
+    pve_fleet_public_cidrs: >-
+      {{ groups[pve_fleet_group]
+         | map('extract', hostvars, 'pve_public_ip')
+         | map('regex_replace', '$', '/32')
+         | list }}
+    pve_fleet_underlay_cidrs: >-
+      {{ groups[pve_fleet_group]
+         | map('extract', hostvars, 'pve_link_ip')
+         | map('regex_replace', '/\d+$', '/32')
+         | list }}
+
+- name: Union the fleet CIDRs with the operator's extras
+  ansible.builtin.set_fact:
+    pve_ssh_whitelist_effective: >-
+      {{ (pve_fleet_public_cidrs + pve_fleet_underlay_cidrs + pve_ssh_whitelist_extra)
+         | reject('equalto', '') | reject('equalto', None)
+         | unique | list }}
+    pve_ssh_jump_argv: >-
+      {{ ['INPUT'] + pve_fw_exempt_argv +
+         ['-p', 'tcp', '--dport', pve_ssh_port | string, '-j', pve_ssh_chain] }}
+
+# ----- Lockout pre-flight, once for the whole play -------------------------
+- name: Detect the SSH source address this run arrived from
+  ansible.builtin.shell: 'echo "${SSH_CONNECTION:-}" | awk ''{print $1}'''
+  args:
+    executable: /bin/bash
+  register: pve_source_probe
+  changed_when: false
+  run_once: true
+
+- name: Compute whether the operator's source address survives the whitelist
+  ansible.builtin.set_fact:
+    pve_source_ip: "{{ pve_source_probe.stdout | trim }}"
+    pve_source_covered: >-
+      {{ (pve_source_probe.stdout | trim) in (pve_ssh_whitelist_effective | map('regex_replace', '/32$', '') | list)
+         or (pve_source_probe.stdout | trim) is regex(pve_ssh_trusted_source_regex) }}
+  run_once: true
+
+- name: Show the effective SSH whitelist and the source check
+  ansible.builtin.debug:
+    msg:
+      fleet_public_cidrs: "{{ pve_fleet_public_cidrs }}"
+      fleet_underlay_cidrs: "{{ pve_fleet_underlay_cidrs }}"
+      operator_extras: "{{ pve_ssh_whitelist_extra }}"
+      effective_whitelist: "{{ pve_ssh_whitelist_effective }}"
+      ansible_source_ip: "{{ pve_source_ip | default('(unknown)') }}"
+      source_covered: "{{ pve_source_covered }}"
+  run_once: true
+
+- name: Confirm with the operator (only when the source address is NOT covered)
+  # Tagged separately so unattended runs can --skip-tags confirm.
+  ansible.builtin.pause:
+    prompt: |
+
+      The SSH whitelist will lock down port {{ pve_ssh_port }} on
+      {{ ansible_play_hosts_all | length }} host(s).
+
+      Your source address ({{ pve_source_ip }}) is NOT in the planned whitelist
+      and does not match pve_ssh_trusted_source_regex. You will lose direct SSH
+      access from this address once the chain is applied.
+
+      Established sessions survive (conntrack); new ones are dropped.
+
+      Press Enter to proceed anyway, Ctrl-C then A to abort.
+  when: not pve_source_covered
+  run_once: true
+  tags: confirm
+
+# ----- Apply, in parallel across the fleet ---------------------------------
+- name: Rebuild the SSH whitelist chain atomically
+  # Single SSH round-trip and a single kernel syscall per host. `-n` (noflush)
+  # leaves INPUT and every other chain untouched; only the chain declared here
+  # is flushed and repopulated.
+  ansible.builtin.shell:
+    cmd: iptables-restore -n
+    stdin: |
+      *filter
+      :{{ pve_ssh_chain }} - [0:0]
+      {% for cidr in pve_ssh_whitelist_effective %}
+      -A {{ pve_ssh_chain }} -s {{ cidr }} -j ACCEPT
+      {% endfor %}
+      -A {{ pve_ssh_chain }} -j DROP
+      COMMIT
+  changed_when: true
+
+- name: Probe whether INPUT already jumps to the SSH whitelist
+  ansible.builtin.command:
+    argv: "{{ ['iptables', '-C'] + pve_ssh_jump_argv }}"
+  register: pve_ssh_jump_check
+  failed_when: false
+  changed_when: false
+
+- name: Insert the INPUT jump at position 1
+  ansible.builtin.command:
+    argv: "{{ ['iptables', '-I', pve_ssh_jump_argv[0], '1'] + pve_ssh_jump_argv[1:] }}"
+  when: pve_ssh_jump_check.rc != 0
+
+- name: Persist the iptables rules
+  ansible.builtin.command: netfilter-persistent save
+  changed_when: true
+
+- name: Dump INPUT and the whitelist chain
+  ansible.builtin.shell: |
+    echo "--- INPUT ---"
+    iptables -S INPUT
+    echo "--- {{ pve_ssh_chain }} ---"
+    iptables -S {{ pve_ssh_chain }}
+  args:
+    executable: /bin/bash
+  register: pve_ssh_chain_dump
+  changed_when: false
+  run_once: true
+
+- name: Result summary (SSH)
+  ansible.builtin.debug:
+    msg: "{{ pve_ssh_chain_dump.stdout_lines }}"
+  run_once: true

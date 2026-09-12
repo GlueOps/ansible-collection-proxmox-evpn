@@ -1,0 +1,16 @@
+---
+# Host firewall: public-wire DHCP filter, monitoring agent whitelist and the
+# SSH whitelist.
+#
+#   ansible-playbook glueops.proxmox_evpn.firewall
+#   ansible-playbook glueops.proxmox_evpn.firewall --tags dhcp,zabbix
+#   ansible-playbook glueops.proxmox_evpn.firewall --tags ssh
+#   ansible-playbook glueops.proxmox_evpn.firewall --skip-tags confirm
+#
+# Re-run after adding a hypervisor, so every host's whitelist picks up the new
+# fleet member.
+- name: Configure the host firewall
+  hosts: "{{ pve_fleet_group | default('pve_nodes') }}"
+  gather_facts: false
+  roles:
+    - role: glueops.proxmox_evpn.pve_firewall

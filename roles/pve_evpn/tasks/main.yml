@@ -1,0 +1,112 @@
+---
+- name: Compute BGP topology (RR-aware; full mesh when no reflectors are set)
+  vars:
+    rr_group: "{{ groups.get(pve_route_reflector_group, []) }}"
+    am_rr: "{{ inventory_hostname in groups.get(pve_route_reflector_group, []) }}"
+  ansible.builtin.set_fact:
+    pve_local_link_ip: "{{ pve_link_ip | split('/') | first }}"
+    pve_is_route_reflector: "{{ am_rr }}"
+    # Who do I peer with?
+    #   No RRs configured -> full mesh (every other host)
+    #   I am an RR        -> every other host (reflectors and clients alike)
+    #   I am a client     -> only the reflectors
+    #
+    # `| sort` is load-bearing, not cosmetic. Ansible's `difference` filter is
+    # set-backed and Python randomises string hashing per process, so the result
+    # comes out in a different order on every run. That reorders the neighbor
+    # stanzas, which makes the config file report changed, which fires the
+    # restart handler — so without sorting, every run restarts FRR on both route
+    # reflectors even when nothing actually changed.
+    pve_bgp_peer_hosts: >-
+      {{
+        (groups[pve_fleet_group] | difference([inventory_hostname]) | sort)
+        if (rr_group | length == 0 or am_rr)
+        else (rr_group | sort)
+      }}
+    # Which of my peers do I treat as RR clients (only meaningful if I am an RR)?
+    pve_rr_client_hosts: >-
+      {{
+        (groups[pve_fleet_group]
+          | difference([inventory_hostname])
+          | difference(rr_group)
+          | sort)
+        if am_rr else []
+      }}
+
+- name: Install FRR
+  ansible.builtin.apt:
+    name: "{{ pve_frr_packages }}"
+    state: present
+    update_cache: true
+
+- name: Enable bgpd
+  ansible.builtin.lineinfile:
+    path: "{{ pve_frr_daemons_path }}"
+    regexp: '^bgpd='
+    line: 'bgpd=yes'
+  notify: restart frr
+
+- name: Write the FRR configuration
+  ansible.builtin.template:
+    src: frr.conf.j2
+    dest: "{{ pve_frr_conf_path }}"
+    owner: frr
+    group: frr
+    mode: "0640"
+  notify: restart frr
+
+- name: Apply FRR changes now
+  ansible.builtin.meta: flush_handlers
+
+- name: Install the BGP convergence gate helper
+  ansible.builtin.copy:
+    src: bgp_evpn_gate.py
+    dest: /usr/local/sbin/pve-bgp-evpn-gate
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Wait for BGP EVPN sessions to establish
+  # A peer with nothing listening on TCP/179 is treated as not-yet-bootstrapped
+  # and skipped; a peer that IS listening but is not Established is a real fault
+  # and holds the gate.
+  ansible.builtin.command: /usr/local/sbin/pve-bgp-evpn-gate
+  register: pve_bgp_gate
+  retries: "{{ pve_bgp_gate_retries }}"
+  delay: "{{ pve_bgp_gate_delay }}"
+  until: pve_bgp_gate.stdout.split()[0] == "ALL_UP"
+  changed_when: false
+
+- name: Report peers skipped as not yet bootstrapped
+  ansible.builtin.debug:
+    msg: "{{ pve_bgp_gate.stdout }}"
+  when: "'skipped=none' not in pve_bgp_gate.stdout"
+
+- name: Collect BGP summary
+  ansible.builtin.command: vtysh -c "show bgp summary"
+  register: pve_bgp_summary
+  changed_when: false
+
+- name: Collect locally exported EVPN VNIs
+  ansible.builtin.command: vtysh -c "show evpn vni"
+  register: pve_evpn_vnis
+  changed_when: false
+
+- name: Collect VXLAN FDB peer entries
+  ansible.builtin.shell: |
+    for d in {{ pve_evpn_report_devices | join(' ') }}; do
+      echo "--- $d ---"
+      bridge fdb show dev "$d" 2>/dev/null | awk '/^00:00:00:00:00:00/ || /extern_learn/' || true
+    done
+  args:
+    executable: /bin/bash
+  register: pve_fdb_peers
+  changed_when: false
+
+- name: Result summary
+  ansible.builtin.debug:
+    msg:
+      role: "{{ 'route-reflector' if pve_is_route_reflector else 'client' }}"
+      bgp_gate: "{{ pve_bgp_gate.stdout }}"
+      evpn_vnis: "{{ pve_evpn_vnis.stdout_lines }}"
+      fdb: "{{ pve_fdb_peers.stdout_lines }}"
